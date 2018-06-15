@@ -8,11 +8,13 @@ use Moo;
 use JSON;
 use Scalar::Util ();
 
-use Types::Standard qw(slurpy Any Optional ArrayRef HashRef CodeRef Dict Bool);
-use Type::Params qw(compile Invocant);
+use Type::Params    qw(compile Invocant);
+use Types::Standard qw(slurpy Any Maybe Optional ArrayRef HashRef CodeRef
+                       Dict Bool);
+
 use JSON::LD::RDFa::Error;
-use JSON::LD::RDFa::Types
-    qw(MaybeURIRef MaybeLang JSONLDVersion JSONLDContexts NamespaceMap);
+use JSON::LD::RDFa::Types qw(URIRef MaybeURIRef MaybeLang
+                             JSONLDVersion JSONLDContexts NamespaceMap);
 
 use URI::NamespaceMap ();
 
@@ -136,11 +138,12 @@ has deref => (
     default => sub { \&_no_deref },
 );
 
-has stack => (
+# to prevent loops, stash remote contexts which have already been seen
+has _seen => (
     is       => 'ro',
-    isa      => ArrayRef,
+    isa      => HashRef,
     init_arg => undef,
-    default  => sub { [] },
+    default  => sub { {} },
 );
 
 =head2 process $CONTEXT [, %ETC]
@@ -150,17 +153,51 @@ either as a constructor or as an instance method. When called as an
 instance method, it will return a new context merged with the
 existing instance. All internal members will also be cloned.
 
+Note that C<$CONTEXT> here is assumed to be JSON which has already
+been parsed: either a C<HASH> reference, a scalar representing a
+remote context URI (or L<URI> object proper), or an C<ARRAY> reference
+containing some quantity of the former two.
+
+In addition to the JSON-LD content, there are three key-value
+parameters:
+
 =over 4
 
 =item base
 
-Supply a base URI if one isn't defined in the context's payload.
+Supply a base URI if one isn't defined in the context's payload. This
+would be, for instance, the URI from which the JSON-LD document was
+retrieved. This can be a string or L<URI> object (it will be coerced).
 
 =item deref
 
-Supply a C<CODE> reference to retrieve remote contexts.
+Supply a C<CODE> reference to retrieve remote contexts, which this
+module does not do by itself. What follows is an extremely naïve
+example of the kind of code which is expected to do the job:
+
+  sub deref {
+      my $self = shift;
+      my $resp = LWP::UserAgent->new->get(shift);
+
+      if ($resp->is_success) {
+          # see the relevant doc for this way of handling redirects
+          $self->mark_assert($resp->request->uri) if $resp->previous;
+
+          # return value will be parsed but you may want to check that
+          # it's JSON...
+          return $resp->content;
+      }
+
+      # otherwise undef
+  }
+
+The function is called as if it is an instance method of the context,
+which gives it access to members like L</
 
 =item clone
+
+Deep-clone the object's members. Defaults to I<true>. Set it to a
+false value to reuse the same ones.
 
 =back
 
@@ -173,10 +210,59 @@ sub process {
         clone => Optional[Bool],
         slurpy Any]);
 
-    my ($self, $obj, $opts) = $check->(@_);
+    my ($self, $ctxs, $opts) = $check->(@_);
+    $opts->{clone} = 1 unless exists $opts->{clone};
+
+    require Data::Dumper;
+    warn Data::Dumper::Dumper($opts);
+
+    # the only special case is when this thing is called as a
+    # constructor; otherwise if we just call it as an instance method
+    # in a tail recursion it should pretty much do what we want
+
+    my $class = ref $self || $self;
+    my %p;
 
     if (ref $self) {
     }
+
+    $class->new(%p);
+}
+
+=head2 seen $URI [, $MARK ]
+
+=cut
+
+sub seen {
+    state $check = compile(Invocant, URIRef, Maybe[Bool]);
+    my ($self, $uri, $mark) = $check->(@_);
+
+    # canonicalize and remove fragment
+    $uri = $uri->canonical;
+    $uri->fragment(undef) if $uri->can('fragment');
+
+    my $seen = $self->_seen;
+    $mark ? $seen->{$uri} = 1 : $seen->{$uri};
+}
+
+=head2 mark $URI
+
+=cut
+
+sub mark {
+    $_[0]->seen($_[1], 1);
+}
+
+=head2 mark_assert $URI
+
+=cut
+
+sub mark_assert {
+    my ($self, $uri) = @_;
+    JSON::LD::RDFa::Error::Cycle->throw
+          (sprintf '%s has already encountered %s', ref $self, $uri)
+              if $self->seen($uri);
+    $self->mark($uri);
 }
 
 =head1 SEE ALSO

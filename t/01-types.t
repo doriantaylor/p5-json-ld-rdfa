@@ -11,7 +11,7 @@ use_ok('JSON::LD::RDFa::Types');
 
 my $js = JSON::LD::RDFa::Types::to_JSONLD('{ "@context": { } }');
 
-is_deeply($js, { '@context' => {} }, 'json coerces ok');
+is_deeply($js, { '@context' => {} }, 'json-ld coerces ok');
 
 my $ctx = JSON::LD::RDFa::Types::to_JSONLDContexts
     ({ '@base' => 'http://foo.bar/' });

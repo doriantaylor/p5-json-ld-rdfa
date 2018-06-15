@@ -5,8 +5,8 @@ use Types::Standard -types, qw(slurpy);
 use Type::Utils -all;
 use Type::Library -base,
     -declare => qw(URIRef MaybeURIRef MaybeLang
-                   Namespace NamespaceMap
-                   JSONLDVersion JSONLDContext JSONLDContexts);
+                   Namespace NamespaceMap JSONLD JSONLDVersion
+                   JSONLDString JSONLDContext JSONLDContexts);
 use JSON;
 use URI;
 use URI::Namespace;
@@ -72,6 +72,12 @@ coerce JSONLD, from ScalarRef, via \&_coerce_jsonld;
 declare JSONLDVersion, as Enum[1, 1.1];
 coerce JSONLDVersion, from Value, via { $_ + 0.0 };
 
+=head3 JSONLDString
+
+=cut
+
+declare JSONLDString, as Str, where { /^\s*[\[\{]/ };
+
 =head3 JSONLDContext
 
 =cut
@@ -83,13 +89,16 @@ declare JSONLDContext, as Dict[
     '@language' => Optional[MaybeLang],
     slurpy Any], coercion => 1;
 
+# coerce JSONLDContext, from JSONLDString, via { to_JSONLD($_) };
+
 =head3 JSONLDContexts
 
 =cut
 
 declare JSONLDContexts, as ArrayRef[JSONLDContext|URIRef], coercion => 1;
 
-coerce JSONLDContexts, from Value,   via { [to_URIRef($_)] };
-coerce JSONLDContexts, from HashRef, via { [to_JSONLDContext($_)] };
+# coerce JSONLDContexts, from JSONLDString, via { [to_JSONLDContext($_)] };
+coerce JSONLDContexts, from HashRef,      via { [to_JSONLDContext($_)] };
+coerce JSONLDContexts, from Value,        via { [to_URIRef($_)] };
 
 1;
