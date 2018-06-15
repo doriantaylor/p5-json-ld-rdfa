@@ -6,6 +6,15 @@ use warnings FATAL => 'all';
 
 use Moo;
 use JSON;
+use Scalar::Util ();
+
+use Types::Standard qw(slurpy Any Optional ArrayRef HashRef CodeRef Dict Bool);
+use Type::Params qw(compile Invocant);
+use JSON::LD::RDFa::Error;
+use JSON::LD::RDFa::Types
+    qw(MaybeURIRef MaybeLang JSONLDVersion JSONLDContexts NamespaceMap);
+
+use URI::NamespaceMap ();
 
 =head1 NAME
 
@@ -31,18 +40,143 @@ C<JSON::LD::Context>. It may indeed be called that one day.
 
 =head1 METHODS
 
-=head2 function1
+=head2 new
+
+=over 4
+
+=item base
+
+The base URI, if set.
 
 =cut
 
-sub function1 {
+has base => (
+    is     => 'rw',
+    isa    => MaybeURIRef,
+    coerce => 1,
+);
+
+=item vocab
+
+The default vocabulary, if set.
+
+=cut
+
+has vocab => (
+    is     => 'rw',
+    isa    => MaybeURIRef,
+    coerce => 1,
+);
+
+=item language
+
+The language, if set.
+
+=cut
+
+has language => (
+    is     => 'rw',
+    isa    => MaybeLang,
+    coerce => 1,
+);
+
+=item version
+
+The JSON-LD version, either 1.0 or 1.1.
+
+=cut
+
+has version => (
+    is     => 'rw',
+    isa    => JSONLDVersion,
+    coerce => 1,
+);
+
+=item ns
+
+This is a conventional L<URI::NamespaceMap>.
+
+=cut
+
+has ns => (
+    is      => 'ro',
+    isa     => NamespaceMap,
+    coerce  => 1,
+    default => sub { URI::NamespaceMap->new },
+);
+
+=item terms
+
+These are any terms that are not namespaces.
+
+=cut
+
+has terms => (
+    is      => 'rwp',
+    isa     => HashRef,
+    default => sub { {} },
+);
+
+=item deref
+
+A subroutine reference that takes a URI as input and returns either a
+valid JSON-LD string or already-parsed object.
+
+=cut
+
+# a subroutine which will take a URI and produce JSON-LD
+sub _no_deref {
+    JSON::LD::RDFa::Error->throw(
+        'This instance doesn\'t support remote contexts!');
 }
 
-=head2 function2
+has deref => (
+    is      => 'ro',
+    isa     => CodeRef,
+    default => sub { \&_no_deref },
+);
+
+has stack => (
+    is       => 'ro',
+    isa      => ArrayRef,
+    init_arg => undef,
+    default  => sub { [] },
+);
+
+=head2 process $CONTEXT [, %ETC]
+
+Process and return a new context object. This method can be called
+either as a constructor or as an instance method. When called as an
+instance method, it will return a new context merged with the
+existing instance. All internal members will also be cloned.
+
+=over 4
+
+=item base
+
+Supply a base URI if one isn't defined in the context's payload.
+
+=item deref
+
+Supply a C<CODE> reference to retrieve remote contexts.
+
+=item clone
+
+=back
 
 =cut
 
-sub function2 {
+sub process {
+    state $check = compile(Invocant, JSONLDContexts, slurpy Dict[
+        base  => Optional[MaybeURIRef],
+        deref => Optional[CodeRef],
+        clone => Optional[Bool],
+        slurpy Any]);
+
+    my ($self, $obj, $opts) = $check->(@_);
+
+    if (ref $self) {
+    }
 }
 
 =head1 SEE ALSO

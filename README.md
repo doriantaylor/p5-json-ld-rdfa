@@ -11,14 +11,14 @@ and this module embeds it into (X)HTML+RDFa.
 
 A deeper observation, perhaps, is that like (X|HT)ML, JSON-LD is an
 (at least partially) ordered tree. This structure can be "borrowed" to
-eliminate the various ambiguities associated with rendering RDF
-data. Indeed, the goal of this module is to render a consistent,
-isomorphic markup structure for a given JSON-LD input, and provide the
-ability to tune that structure enough to produce high-enough quality
-markup to be viewed directly for the purpose of development, as well
-as re-ingested and further manipulated downstream.
+eliminate many of the ambiguities associated with rendering RDF data.
+Indeed, the goal of this module is to render a consistent, isomorphic
+markup structure for a given JSON-LD input, and provide the ability to
+tune that structure enough to produce high-enough quality markup to be
+viewed directly for the purpose of development, as well as re-ingested
+and further manipulated downstream.
 
-## License & Copyright
+## Copyright & License
 
 Copyright (C) 2018 Dorian Taylor
 
