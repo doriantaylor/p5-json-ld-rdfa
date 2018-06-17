@@ -91,14 +91,22 @@ declare JSONLDContext, as Dict[
 
 # coerce JSONLDContext, from JSONLDString, via { to_JSONLD($_) };
 
+=head3 JSONLDRemoteContext
+
+=cut
+
+declare JSONLDRemoteContext, as Dict[
+    '@context' => URIRef|JSONLDContext, slurpy Any], coercion => 1;
+
 =head3 JSONLDContexts
 
 =cut
 
-declare JSONLDContexts, as ArrayRef[JSONLDContext|URIRef], coercion => 1;
+declare JSONLDContexts, as ArrayRef[Maybe[JSONLDContext|URIRef]], coercion => 1;
 
-# coerce JSONLDContexts, from JSONLDString, via { [to_JSONLDContext($_)] };
+coerce JSONLDContexts, from Undef,        via { [undef] };
 coerce JSONLDContexts, from HashRef,      via { [to_JSONLDContext($_)] };
 coerce JSONLDContexts, from Value,        via { [to_URIRef($_)] };
+# coerce JSONLDContexts, from JSONLDString, via { [to_JSONLDContext($_)] };
 
 1;

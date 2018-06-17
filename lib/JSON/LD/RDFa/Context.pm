@@ -5,8 +5,6 @@ use strict;
 use warnings FATAL => 'all';
 
 use Moo;
-use JSON;
-use Scalar::Util ();
 
 use Type::Params    qw(compile Invocant);
 use Types::Standard qw(slurpy Any Maybe Optional ArrayRef HashRef CodeRef
@@ -16,6 +14,9 @@ use JSON::LD::RDFa::Error;
 use JSON::LD::RDFa::Types qw(URIRef MaybeURIRef MaybeLang
                              JSONLDVersion JSONLDContexts NamespaceMap);
 
+use JSON              ();
+use Clone             ();
+use Scalar::Util      ();
 use URI::NamespaceMap ();
 
 =head1 NAME
@@ -142,7 +143,6 @@ has deref => (
 has _seen => (
     is       => 'ro',
     isa      => HashRef,
-    init_arg => undef,
     default  => sub { {} },
 );
 
@@ -203,18 +203,31 @@ false value to reuse the same ones.
 
 =cut
 
+sub _maybe_clone {
+    my ($thing, $clone) = @_;
+    return $thing unless $clone;
+    return $thing->clone
+        if Scalar::Util::blessed($thing) and $thing->can('clone');
+    Clone::clone($thing);
+}
+
+# https://json-ld.org/spec/latest/json-ld-api/#context-processing-algorithm
 sub process {
+    # one-time compilation of input sanitation function
     state $check = compile(Invocant, JSONLDContexts, slurpy Dict[
         base  => Optional[MaybeURIRef],
         deref => Optional[CodeRef],
+        mode  => Optional[JSONLDVersion],
         clone => Optional[Bool],
         slurpy Any]);
 
+    # sanitize input
     my ($self, $ctxs, $opts) = $check->(@_);
-    $opts->{clone} = 1 unless exists $opts->{clone};
 
-    require Data::Dumper;
-    warn Data::Dumper::Dumper($opts);
+    # deal with optional parameters
+    my $base  = $opts->{base};
+    my $deref = $opts->{deref};
+    my $clone = exists($opts->{clone}) ? $opts->{clone} : ($opts->{clone} = 1);
 
     # the only special case is when this thing is called as a
     # constructor; otherwise if we just call it as an instance method
@@ -223,13 +236,79 @@ sub process {
     my $class = ref $self || $self;
     my %p;
 
+    # if this is called from an instance, clone all the existing bits
     if (ref $self) {
+        # the basics
+        $p{base}     = _maybe_clone($self->base,  $clone) if $self->base;
+        $p{vocab}    = _maybe_clone($self->vocab, $clone) if $self->vocab;
+        $p{language} = $self->language if $self->language;
+        $p{version}  = $self->version  if $self->version;
+        $p{deref}    = $self->deref    if $self->deref;
+
+        # deal with the namespace map
+        $p{ns} = $self->ns;
+        if ($clone) {
+            my $ns = $p{ns} = URI::NamespaceMap->new;
+            while (my ($k, $v) = $self->ns->each_map) {
+                $ns->add_mapping($k, $v->as_string);
+            }
+        }
+
+        # deal with the remaining term map
+        $p{terms} = _maybe_clone($self->terms, $clone);
     }
 
-    $class->new(%p);
+    # overwrite these members
+    $p{base}  = $base  if $base;
+    $p{deref} = $deref if $deref;
+
+    # now we shift off the first context and process it
+    my $ctx = shift @$ctxs or return $class->new(%p);
+
+    # dereference the context if it is remote
+    if (Scalar::Util::blessed($ctx) and $ctx->isa('URI')) {
+        $ctx = URI->new_abs($ctx, $p{base}) if $p{base};
+
+        # XXX lol
+        JSON::LD::RDFa::Error::Unimplemented->throw('No remote contexts yet');
+
+        # if this returns an ARRAY make sure it is unshifted onto the
+        # front of the context list
+    }
+
+    # deal with base
+    # deal with version
+    # deal with vocab
+    # deal with language
+
+    # now we initialize the new context
+    my $new = $class->new(%p);
+
+    # parse out term definitions other than keywords
+
+    state %kw = map { "\@$_" => 1 } qw(base version vocab language);
+    my %done;
+    for my $term (grep { !($kw{$_} || $done{$_}) } keys %$ctx) {
+        $new->_create_term_definition($ctx, $term, \%done);
+    }
+
+    # we don't need to clone if there are other contexts as 
+    @$ctxs ? $new->process($ctxs, %$opts, clone => 0) : $new;
+}
+
+# https://json-ld.org/spec/latest/json-ld-api/#create-term-definition
+sub _create_term_definition {
+    my ($self, $context, $term, $defined) = @_;
+    $defined ||= {};
+}
+
+# https://json-ld.org/spec/latest/json-ld-api/#iri-expansion
+sub _iri_expansion {
 }
 
 =head2 seen $URI [, $MARK ]
+
+Check if a remote context URI has already been seen.
 
 =cut
 
@@ -247,6 +326,8 @@ sub seen {
 
 =head2 mark $URI
 
+Mark a remote context URI as seen.
+
 =cut
 
 sub mark {
@@ -254,6 +335,9 @@ sub mark {
 }
 
 =head2 mark_assert $URI
+
+Mark a remote context URI as seen, or throw an error if it has already
+been seen.
 
 =cut
 
