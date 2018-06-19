@@ -1,12 +1,18 @@
 package JSON::LD::RDFa::Types;
 
+use 5.012;
+use strict;
+use warnings FATAL => 'all';
+
 use Types::XSD::Lite qw(Language);
 use Types::Standard -types, qw(slurpy);
 use Type::Utils -all;
 use Type::Library -base,
     -declare => qw(URIRef MaybeURIRef MaybeLang
                    Namespace NamespaceMap JSONLD JSONLDVersion
-                   JSONLDString JSONLDContext JSONLDContexts);
+                   JSONLDString JSONLDContext JSONLDContexts
+                   JSONLDRemoteContext JSONLDKeyword JSONLDContainerDef
+              );
 use JSON;
 use URI;
 use URI::Namespace;
@@ -108,5 +114,31 @@ coerce JSONLDContexts, from Undef,        via { [undef] };
 coerce JSONLDContexts, from HashRef,      via { [to_JSONLDContext($_)] };
 coerce JSONLDContexts, from Value,        via { [to_URIRef($_)] };
 # coerce JSONLDContexts, from JSONLDString, via { [to_JSONLDContext($_)] };
+
+declare JSONLDKeyword, as Enum[
+    map { '@' . $_ } qw(base container context graph id index language list
+                        nest none prefix reverse set type value version vocab)];
+
+my @TESTS = (
+    [qw(graph id)],
+    [qw(graph index)],
+    [qw(graph id set)],
+    [qw(graph index set)],
+    [qw(id set)],
+    [qw(index set)],
+    [qw(set type)],
+);
+
+declare JSONLDContainerDef, as ArrayRef[JSONLDKeyword], where {
+    my @c = sort map { substr $_, 1 } @$_;
+    return 1 if @c == 1 and
+        grep { $c[0] eq $_ } qw(graph id index language list set type);
+
+    for my $t (@TESTS) {
+        return 1 if @c == @$t and @c == grep { $c[$_] eq $t->[$_] } (0..$#c);
+    }
+
+    return;
+};
 
 1;

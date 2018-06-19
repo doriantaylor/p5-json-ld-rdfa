@@ -11,8 +11,8 @@ use Types::Standard qw(slurpy Any Maybe Optional ArrayRef HashRef CodeRef
                        Dict Bool);
 
 use JSON::LD::RDFa::Error;
-use JSON::LD::RDFa::Types qw(URIRef MaybeURIRef MaybeLang
-                             JSONLDVersion JSONLDContexts NamespaceMap);
+use JSON::LD::RDFa::Types qw(URIRef MaybeURIRef MaybeLang NamespaceMap
+                             JSONLDVersion JSONLDContexts JSONLDContainerDef);
 
 use JSON              ();
 use Clone             ();
@@ -266,6 +266,7 @@ sub process {
     my $ctx = shift @$ctxs or return $class->new(%p);
 
     # dereference the context if it is remote
+    my $is_remote;
     if (Scalar::Util::blessed($ctx) and $ctx->isa('URI')) {
         $ctx = URI->new_abs($ctx, $p{base}) if $p{base};
 
@@ -277,18 +278,53 @@ sub process {
     }
 
     # deal with base
+    if (exists $ctx->{'@base'} and not $is_remote) {
+        my $b = $ctx->{'@base'};
+        # XXX mehhhhh this logic isn't very good
+        if ($base) {
+            $p{base} = URI->new_abs($b, $base);
+        }
+        else {
+            JSON::LD::RDFa::Error::Invalid->throw
+                  ("Invalid base URI ($b)") unless $b->scheme;
+            $p{base} = _maybe_clone($b, $clone);
+        }
+    }
+
     # deal with version
+    if (exists $ctx->{'@version'}) {
+        my $v = $ctx->{'@version'};
+        JSON::LD::RDFa::Error::Invalid->throw("Invalid version ($v)")
+              unless defined $v and $v == 1.1;
+        # XXX no way to transmit the API level yet but whatev
+        $p{version} = 1.1;
+    }
+
     # deal with vocab
+    if (exists $ctx->{'@vocab'}) {
+        JSON::LD::RDFa::Error::Invalid->throw('Invalid @vocab')
+              unless is_MaybeURIRef($p{vocab} = $ctx->{'@vocab'});
+        $p{vocab} = URI->new_abs($p{vocab}, $p{base})
+            if (defined $p{vocab} and defined $p{base});
+    }
+
     # deal with language
+    if (exists $ctx->{'@language'}) {
+        $p{language} = $ctx->{'@language'};
+    }
 
     # now we initialize the new context
     my $new = $class->new(%p);
 
     # parse out term definitions other than keywords
 
-    state %kw = map { "\@$_" => 1 } qw(base version vocab language);
+    # "Initialization of state variables in list context currently forbidden"
+    state %kw;
+    %kw = map { '@' . $_ => 1 } qw(base version vocab language);
+
     my %done;
-    for my $term (grep { !($kw{$_} || $done{$_}) } keys %$ctx) {
+    for my $term (grep { !$kw{$_} } keys %$ctx) {
+        next if $done{$term}; # done gets updated in situ
         $new->_create_term_definition($ctx, $term, \%done);
     }
 
@@ -300,6 +336,232 @@ sub process {
 sub _create_term_definition {
     my ($self, $context, $term, $defined) = @_;
     $defined ||= {};
+
+    # 4.2.2.1
+    if (exists $defined->{$term}) {
+        return if $defined->{$term};
+        JSON::LD::RDFa::Error::Cycle->throw("cyclic IRI mapping: $term");
+    }
+    # 4.2.2.2
+    $defined->{$term} = 0;
+
+    # 4.2.2.3
+    state %kw;
+    %kw = map { '@' . $_ => 1 }
+        qw(base container context graph id index language list nest none
+           prefix reverse set type value version vocab);
+    JSON::LD::RDFa::Error::Conflict->new("Keyword redefinition: $term")
+          if $kw{$term};
+
+    # 4.2.2.4
+    my %terms = %{$self->terms};
+    delete $terms{$term};
+
+    # 4.2.2.5
+    my $val = _maybe_clone($context->{$term}, 1);
+
+    # 4.2.2.6
+    if (!defined $val or (ref $val eq 'HASH' and exists $val->{'@id'}
+                              and !defined $val->{'@id'})) {
+        $terms{$term} = undef;
+        return;
+    }
+
+    # 4.2.2.7
+    my $simple;
+    if (!ref $val or is_URIRef($val)) {
+        $val = { '@id' => $val };
+        $simple = 1;
+    }
+
+    # 4.2.2.8
+    JSON::LD::RDFa::Error::Invalid->throw("Invalid term definition $term")
+          unless ref $val eq 'HASH';
+
+    # 4.2.2.9
+    my %definition;
+
+    # 4.2.2.10
+    if (exists $val->{'@type'}) {
+        my $type = $val->{'@type'};
+
+        # 4.2.2.10.1
+        JSON::LD::RDFa::Error::Invalid->throw("Invalid type mapping: $type")
+              unless defined $type and (!ref $type or is_URIRef($type));
+
+        # 4.2.2.10.2
+        $type = $self->_iri_expansion($type, 1, $context, $defined);
+        JSON::LD::RDFa::Error::Invalid->throw("Invalid type mapping: $type")
+              unless defined $type
+                  and (is_URIRef($type) or $type =~ /^\@(id|vocab)$/);
+
+        # 4.2.2.10.3
+        $definition{type} = $type;
+    }
+
+    # 4.2.2.11
+    if (exists $val->{'@reverse'}) {
+        # 4.2.2.11.1
+        JSON::LD::RDFa::Error::Invalid->throw("Invalid reverse property: $term")
+              if grep { exists $val->{$_} } qw(@id @nest);
+
+        # 4.2.2.11.2
+        my $rev = $val->{'@reverse'};
+        JSON::LD::RDFa::Error::Invalid->throw("Invalid IRI mapping: $rev")
+              unless defined $rev and (!ref $rev or is_URIRef($rev));
+
+        # 4.2.2.11.3
+        $rev = $self->_iri_expansion($rev, 1, $context, $defined);
+        JSON::LD::RDFa::Error::Invalid->throw("Invalid IRI mapping: $rev")
+              unless defined $rev and $rev =~ /:/;
+        $definition{iri} = $rev;
+
+        # 4.2.2.11.4
+        if (exists $val->{'@container'}) {
+            my $c = $definition{container} = $val->{'@container'};
+            JSON::LD::RDFa::Error::Invalid->throw
+                  ("Invalid container mapping: $c")
+                      unless !defined $c or $c =~ /^\@(set|index)$/;
+        }
+
+        # 4.2.2.11.5
+        $definition{reverse} = 1;
+
+        # 4.2.2.11.6
+        $terms{$term} = \%definition;
+        $defined->{$term} = 1;
+        return;
+    }
+
+    # 4.2.2.12
+    $definition{reverse} = 0;
+
+    # 4.2.2.13
+    if (exists $val->{'@id'} and $val->{'@id'} ne $term) {
+        my $id = $val->{'@id'};
+
+        # 4.2.2.13.1
+        JSON::LD::RDFa::Error::Invalid->throw("Invalid IRI mapping: $id")
+              unless !ref $id or is_URIRef($id);
+
+        # 4.2.2.13.2
+        $id = $self->_iri_expansion($id, 1, $context, $defined);
+        JSON::LD::RDFa::Error::Invalid->throw("Invalid IRI mapping: $id")
+              unless is_JSONLDKeyword($id) or is_URIRef($id);
+        JSON::LD::RDFa::Error::Invalid->throw('Invalid keyword alias: @context')
+              if $id eq '@context';
+        $definition{iri} = $id;
+
+        # 4.2.2.13.3
+        $simple = 1 unless $term =~ /:/;
+        $definition{prefix} = 1 if $id =~ /[:\/?#\[\]@]$/
+    }
+
+    # 4.2.2.14 (not sure if this is an elsif)
+    if ($term =~ /^(.*?):(.*?)$/) {
+        my ($p, $s) = ($1, $2);
+        # 4.2.2.14.1
+        $self->_create_term_definition($context, $p, $defined)
+            if $s !~ m!/! and exists $context->{$p};
+        # 4.2.2.14.2
+        if (my $i = $terms{$p}{iri}) {
+            $definition{iri} = URI->new($i . $s);
+        }
+        else {
+            # 4.2.2.14.3
+            $definition{iri} = URI->new($term);
+        }
+    }
+    else {
+        # 4.2.2.15
+        JSON::LD::RDFa::Error::Invalid->throw("Invalid IRI mapping: $term")
+              unless $self->vocab;
+        $definition{iri} = URI->new_abs($term, $self->vocab);
+    }
+
+    # 4.2.2.16
+    if (exists $val->{'@container'}) {
+        my $c = $val->{'@container'};
+        $c = [$c] unless ref $c;
+
+        # 4.2.2.16.1 lol go look at JSONLDContainerDef
+        JSON::LD::RDFa::Error::Invalid->throw('Invalid container mapping')
+              unless ref $c eq 'ARRAY' and is_JSONLDContainerDef($c);
+
+        # 4.2.2.16.2
+        JSON::LD::RDFa::Error::Invalid->throw('Invalid container mapping')
+              if $self->version == 1.0
+                  and (@$c != 1 or $c->[0] !~ /^\@(graph|id|type)$/);
+        # 4.2.2.16.3
+        $definition{container} = $c;
+    }
+
+    # 4.2.2.17
+    if (exists $val->{'@context'}) {
+        # 4.2.2.17.1
+        JSON::LD::RDFa::Error::Invalid->throw('Invalid term definition')
+              if $self->version == 1.0;
+        # 4.2.2.17.2
+        my $ctx = $val->{'@context'};
+        try {
+            # 4.2.2.17.3
+            $ctx = $self->process($ctx, clone => 1);
+        } catch {
+            # rethrow
+            JSON::LD::RDFa::Error::Invalid->throw
+                  ("Invalid scoped context: $_");
+        };
+        # 4.2.2.17.4
+        $definition{context} = $ctx;
+    }
+
+    # 4.2.2.18
+    if (exists $val->{'@language'}) {
+        # 4.2.2.18.1
+        my $lang = $val->{'@language'};
+        JSON::LD::RDFa::Error::Invalid->throw("Invalid language mapping: $lang")
+              unless !defined $lang or !ref $lang;
+        # 4.2.2.18.1
+        $lang = lc $lang if defined $lang;
+        $definition{language} = $lang;
+    }
+
+    # 4.2.2.19
+    if (exists $val->{'@nest'}) {
+        my $n = $val->{'@nest'};
+        # 4.2.2.19.1
+        JSON::LD::RDFa::Error::Invalid->throw('Invalid term definition')
+              if $self->version == 1.0;
+        # 4.2.2.19.2 NOTE the doc says 'defined' not 'definition; this
+        # is almost certainly a mistake
+        JSON::LD::RDFa::Error::Invalid->throw("Invalid \@nest value: $n")
+              if !defined $n or ref $n or ($n =~ /^@(.*?)$/ and $1 ne 'nest');
+        $definition{nest} = $n;
+    }
+
+    # 4.2.2.20
+    if (exists $val->{'@prefix'}) {
+        # 4.2.2.20.1
+        JSON::LD::RDFa::Error::Invalid->throw('Invalid term definition')
+              if $self->version == 1.0 or $term =~ /:/;
+        my $p = $val->{'@prefix'};
+        # 4.2.2.20.2
+        JSON::LD::RDFa::Error::Invalid->throw("Invalid \@prefix value: $p")
+              unless defined $p and ($p =~ /^(0|1)$/ or JSON::is_bool($p));
+        $definition{prefix} = 0 + $p; # de-boolean this
+    }
+
+    # 4.2.2.21
+    JSON::LD::RDFa::Error::Invalid->throw("Invalid term definition: $term")
+          if grep {
+              $_ !~ /^\@(id|reverse|container|context|nest|prefix|type)$/
+          } keys %$val;
+
+    # 4.2.2.22
+    $terms{$term} = \%definition;
+    $defined->{$term} = 1;
+
+    return;
 }
 
 # https://json-ld.org/spec/latest/json-ld-api/#iri-expansion

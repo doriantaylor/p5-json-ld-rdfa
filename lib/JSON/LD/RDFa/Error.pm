@@ -5,7 +5,7 @@ use warnings FATAL => 'all';
 
 use Moo;
 
-with 'Throwable';
+extends 'Throwable::Error';
 
 # these are from https://json-ld.org/spec/latest/json-ld-api/#jsonlderrorcode
 our @ERRORS = (
