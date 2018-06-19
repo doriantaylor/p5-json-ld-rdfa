@@ -354,8 +354,8 @@ sub _create_term_definition {
           if $kw{$term};
 
     # 4.2.2.4
-    my %terms = %{$self->terms};
-    delete $terms{$term};
+    my $terms = $self->terms;
+    delete $terms->{$term};
 
     # 4.2.2.5
     my $val = _maybe_clone($context->{$term}, 1);
@@ -363,7 +363,7 @@ sub _create_term_definition {
     # 4.2.2.6
     if (!defined $val or (ref $val eq 'HASH' and exists $val->{'@id'}
                               and !defined $val->{'@id'})) {
-        $terms{$term} = undef;
+        $terms->{$term} = undef;
         return;
     }
 
@@ -390,7 +390,8 @@ sub _create_term_definition {
               unless defined $type and (!ref $type or is_URIRef($type));
 
         # 4.2.2.10.2
-        $type = $self->_iri_expansion($type, 1, $context, $defined);
+        $type = $self->_iri_expansion
+            ($type, vocab => 1, context => $context, defined => $defined);
         JSON::LD::RDFa::Error::Invalid->throw("Invalid type mapping: $type")
               unless defined $type
                   and (is_URIRef($type) or $type =~ /^\@(id|vocab)$/);
@@ -411,7 +412,8 @@ sub _create_term_definition {
               unless defined $rev and (!ref $rev or is_URIRef($rev));
 
         # 4.2.2.11.3
-        $rev = $self->_iri_expansion($rev, 1, $context, $defined);
+        $rev = $self->_iri_expansion
+            ($rev, vocab => 1, context => $context, defined => $defined);
         JSON::LD::RDFa::Error::Invalid->throw("Invalid IRI mapping: $rev")
               unless defined $rev and $rev =~ /:/;
         $definition{iri} = $rev;
@@ -428,7 +430,7 @@ sub _create_term_definition {
         $definition{reverse} = 1;
 
         # 4.2.2.11.6
-        $terms{$term} = \%definition;
+        $terms->{$term} = \%definition;
         $defined->{$term} = 1;
         return;
     }
@@ -445,7 +447,8 @@ sub _create_term_definition {
               unless !ref $id or is_URIRef($id);
 
         # 4.2.2.13.2
-        $id = $self->_iri_expansion($id, 1, $context, $defined);
+        $id = $self->_iri_expansion
+            ($id, vocab => 1, context => $context, defined => $defined);
         JSON::LD::RDFa::Error::Invalid->throw("Invalid IRI mapping: $id")
               unless is_JSONLDKeyword($id) or is_URIRef($id);
         JSON::LD::RDFa::Error::Invalid->throw('Invalid keyword alias: @context')
@@ -464,7 +467,7 @@ sub _create_term_definition {
         $self->_create_term_definition($context, $p, $defined)
             if $s !~ m!/! and exists $context->{$p};
         # 4.2.2.14.2
-        if (my $i = $terms{$p}{iri}) {
+        if (my $i = $terms->{$p}{iri}) {
             $definition{iri} = URI->new($i . $s);
         }
         else {
@@ -558,7 +561,7 @@ sub _create_term_definition {
           } keys %$val;
 
     # 4.2.2.22
-    $terms{$term} = \%definition;
+    $terms->{$term} = \%definition;
     $defined->{$term} = 1;
 
     return;
@@ -566,6 +569,46 @@ sub _create_term_definition {
 
 # https://json-ld.org/spec/latest/json-ld-api/#iri-expansion
 sub _iri_expansion {
+    my ($self, $value, %opts) = @_;
+    my $def = $opts{defined} ||= {};
+    # 4.3.2.1
+    return $value if !defined $value or $value =~ /^\@/;
+    # 4.3.2.2
+    my $ctx = $opts{context};
+    $self->_create_term_definition($ctx, $value, $def)
+        if $ctx and $ctx->{$value} and !$def->{$value};
+
+    my $terms = $self->terms;
+    if (my $t = $terms->{$value}) {
+        # 4.3.2.3, 4.3.2.4
+        my $i = $t->{iri};
+        return $i if defined $i and ($i =~ /^@/ or $opts{vocab});
+    }
+
+    # 4.3.2.5
+    if ($value =~ /^(.*?):(.*?)$/) {
+        # 4.3.2.5.1
+        my ($p, $s) = ($1, $2);
+        # 4.3.2.5.2
+        return $value if $p eq '_' or $s =~ m!^//!;
+        # 4.3.2.5.3
+        $self->_create_term_definition($ctx, $p, $def)
+            if $ctx and $ctx->{$p} and !$def->{$p};
+        # 4.3.2.5.4
+        return URI->new($terms->{$p}{iri} . $s)
+            if $terms->{$p} and $terms->{$p}{iri};
+        # 4.3.2.5.5
+        return $value;
+    }
+
+    # 4.3.2.6
+    return URI->new($self->vocab . $value) if $self->vocab and $opts{vocab};
+
+    # 4.3.2.7
+    return URI->new_abs($value, $self->base) if $self->base and $opts{relative};
+
+    # 4.3.2.8
+    $value;
 }
 
 =head2 seen $URI [, $MARK ]
