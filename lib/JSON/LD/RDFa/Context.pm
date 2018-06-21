@@ -11,8 +11,9 @@ use Types::Standard qw(slurpy Any Maybe Optional ArrayRef HashRef CodeRef
                        Dict Bool);
 
 use JSON::LD::RDFa::Error;
-use JSON::LD::RDFa::Types qw(URIRef MaybeURIRef MaybeLang NamespaceMap
-                             JSONLDVersion JSONLDContexts JSONLDContainerDef);
+use JSON::LD::RDFa::Types qw(URIRef is_URIRef MaybeURIRef MaybeLang
+                             NamespaceMap is_JSONLDKeyword JSONLDVersion
+                             JSONLDContexts is_JSONLDContainerDef);
 
 use JSON              ();
 use Clone             ();
@@ -347,7 +348,7 @@ sub _create_term_definition {
 
     # 4.2.2.3
     state %kw;
-    %kw = map { '@' . $_ => 1 }
+    %kw ||= map { '@' . $_ => 1 }
         qw(base container context graph id index language list nest none
            prefix reverse set type value version vocab);
     JSON::LD::RDFa::Error::Conflict->new("Keyword redefinition: $term")
@@ -356,6 +357,8 @@ sub _create_term_definition {
     # 4.2.2.4
     my $terms = $self->terms;
     delete $terms->{$term};
+    # my addition
+    $self->ns->remove_mapping($term);
 
     # 4.2.2.5
     my $val = _maybe_clone($context->{$term}, 1);
@@ -368,7 +371,7 @@ sub _create_term_definition {
     }
 
     # 4.2.2.7
-    my $simple;
+    my $simple; # it is never explained what $simple does
     if (!ref $val or is_URIRef($val)) {
         $val = { '@id' => $val };
         $simple = 1;
@@ -414,6 +417,7 @@ sub _create_term_definition {
         # 4.2.2.11.3
         $rev = $self->_iri_expansion
             ($rev, vocab => 1, context => $context, defined => $defined);
+        $rev = URI->new($rev) unless ref $rev;
         JSON::LD::RDFa::Error::Invalid->throw("Invalid IRI mapping: $rev")
               unless defined $rev and $rev =~ /:/;
         $definition{iri} = $rev;
@@ -449,6 +453,7 @@ sub _create_term_definition {
         # 4.2.2.13.2
         $id = $self->_iri_expansion
             ($id, vocab => 1, context => $context, defined => $defined);
+        $id = URI->new($id) unless ref $id;
         JSON::LD::RDFa::Error::Invalid->throw("Invalid IRI mapping: $id")
               unless is_JSONLDKeyword($id) or is_URIRef($id);
         JSON::LD::RDFa::Error::Invalid->throw('Invalid keyword alias: @context')
@@ -457,11 +462,15 @@ sub _create_term_definition {
 
         # 4.2.2.13.3
         $simple = 1 unless $term =~ /:/;
-        $definition{prefix} = 1 if $id =~ /[:\/?#\[\]@]$/
+        if ($id =~ /[:\/?#\[\]@]$/) {
+            $definition{prefix} = 1;
+            # this is my addition
+            $self->ns->add_mapping($term => $id);
+        }
     }
-
     # 4.2.2.14 (not sure if this is an elsif)
-    if ($term =~ /^(.*?):(.*?)$/) {
+    elsif ($term =~ /^(.*?):(.*?)$/) {
+        # narrator: it was an elsif
         my ($p, $s) = ($1, $2);
         # 4.2.2.14.1
         $self->_create_term_definition($context, $p, $defined)
@@ -551,7 +560,11 @@ sub _create_term_definition {
         # 4.2.2.20.2
         JSON::LD::RDFa::Error::Invalid->throw("Invalid \@prefix value: $p")
               unless defined $p and ($p =~ /^(0|1)$/ or JSON::is_bool($p));
-        $definition{prefix} = 0 + $p; # de-boolean this
+        $p = $definition{prefix} = 0 + $p; # de-boolean this
+
+        # this is my addition
+        $self->ns->add_mapping($term, $definition{iri})
+            if $p and $definition{iri};
     }
 
     # 4.2.2.21

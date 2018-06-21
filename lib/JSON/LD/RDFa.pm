@@ -35,18 +35,75 @@ our $VERSION = '0.01';
 
 =head1 METHODS
 
-=head2 function1
+=head2 new %PARAMS
 
 =cut
 
-sub function1 {
-}
+=head2 convert $JSONLD [, %OPTIONS ]
 
-=head2 function2
+Generate an L<XML::LibXML::Document> from JSON-LD input, which may be
+a valid JSON string, a reference to such a string, or a Perl data
+structure representing valid JSON-LD. There are additional options:
+
+=over 4
+
+=item uri
+
+The URI of the document. Assumed to be a L<URI> object, and will be
+coerced into one.
+
+=item context
+
+This can either be a context object, the URI of a remote context, or
+an C<ARRAY> reference containing a mix of the prior two. Note that by
+design, this module does not dereference remote documents. To
+dereference you must pass in your own L</deref> function.
+
+=item deref
+
+This is a C<CODE> reference that is expected to return the contents of
+a JSON object, either parsed or unparsed.
+
+B<THIS IS NOT IMPLEMENTED YET.> I am particularly concerned about how
+to decouple the dereferencing code in a way that appropriately handles
+cycles of references. Nevertheless a working function would probably
+look something like this:
+
+  sub deref_json {
+    my $uri = shift;
+
+    # LWP (HTTP) is just *one* way to dereference remote JSON-LD
+    # content; application developers will undoubtedly have others
+
+    my $ua = LWP::UserAgent->new;
+
+    # for instance we can insist on a content type
+    $ua->default_header(
+      Accept => 'application/ld+json;q=1.0, application/json;q=1.0, */*;q=0');
+
+    my $resp = $ua->get($uri);
+
+    # this function is `eval`ed and any terminal errors are bubbled up
+    die $resp->code unless $resp->is_success;
+
+    # for big content we can return a SCALAR reference so as not to
+    # duplicate it in memory
+    my $json = $resp->content_ref;
+
+    # since cycles are a big no-no we collect any redirects
+    my @redir;
+    do {
+      push @redir, $resp->request->uri;
+    } while ($resp = $resp->previous);
+
+    # ...and return them along with the content (reference).
+    return ($json, @redir);
+  }
 
 =cut
 
-sub function2 {
+sub convert {
+    
 }
 
 =head1 SEE ALSO
