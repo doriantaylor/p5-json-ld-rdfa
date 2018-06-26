@@ -7,6 +7,16 @@ use warnings FATAL => 'all';
 use Moo;
 use JSON;
 
+use Type::Params    qw(compile Invocant);
+use Types::Standard qw(slurpy Any Maybe Optional ArrayRef HashRef CodeRef
+                       Dict Bool);
+
+use JSON::LD::RDFa::Error;
+use JSON::LD::RDFa::Types qw(URIRef is_URIRef MaybeURIRef MaybeLang
+                             NamespaceMap is_JSONLDKeyword JSONLDVersion
+                             JSONLDContexts is_JSONLDContainerDef
+                             JSONLDWildCard);
+
 with 'Role::Markup::XML';
 
 =head1 NAME
@@ -90,7 +100,7 @@ look something like this:
     # duplicate it in memory
     my $json = $resp->content_ref;
 
-    # since cycles are a big no-no we collect any redirects
+    # since cycles are a big no-no we collect any redirects...
     my @redir;
     do {
       push @redir, $resp->request->uri;
@@ -103,14 +113,35 @@ look something like this:
 =cut
 
 sub convert {
-    
+    state $check = Type::Params::compile(
+        Invocant, JSONLDWildCard,
+        slurpy Dict[uri     => Optional[MaybeURIRef],
+                    context => Optional[JSONLDContext],
+                    deref   => Optional[CodeRef] ]);
+
+    my ($self, $json, $params) = $check->(@_);
+
+    # normalize params
+    my $uri     = $params->{uri};
+    my $deref   = $params->{deref} || $self->deref;
+    my $context = $params->{context} ||=
+        JSON::LD::RDFa::Context->new(base => $uri, deref => $params->{deref});
+
+    # expand the json
+    my %p = (clone => 0);
+    # override these in case a context was supplied
+    $p{base}  = $uri if $uri;
+    $p{deref} = $params->{deref} if $params->{deref};
+    my @graph = $context->expand($json, %p);
+
+    # now generate the document
 }
 
 =head1 SEE ALSO
 
 =over 4
 
-=item 
+=item
 
 L<JSON>
 

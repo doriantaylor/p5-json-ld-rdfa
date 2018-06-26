@@ -104,7 +104,24 @@ my $person = JSON::decode_json(<<'CTX');
 }
 CTX
 
-my $ctx = JSON::LD::RDFa::Context->process($person->{'@context'});
+my $ctr = JSON::decode_json(<<'CTX');
+{
+    "@version": 1.1,
+    "generatedAt": {
+      "@id": "http://www.w3.org/ns/prov#generatedAtTime",
+      "@type": "http://www.w3.org/2001/XMLSchema#date"
+    },
+    "Person": "http://xmlns.com/foaf/0.1/Person",
+    "name": "http://xmlns.com/foaf/0.1/name",
+    "knows": "http://xmlns.com/foaf/0.1/knows",
+    "claim": {
+      "@id": "https://w3id.org/credentials#claim",
+      "@container": "@graph"
+    }
+}
+CTX
+
+my $ctx = JSON::LD::RDFa::Context->process($ctr); #($person->{'@context'});
 
 require Data::Dumper;
 warn Data::Dumper::Dumper($ctx);

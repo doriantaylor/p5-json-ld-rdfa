@@ -13,7 +13,8 @@ use Types::Standard qw(slurpy Any Maybe Optional ArrayRef HashRef CodeRef
 use JSON::LD::RDFa::Error;
 use JSON::LD::RDFa::Types qw(URIRef is_URIRef MaybeURIRef MaybeLang
                              NamespaceMap is_JSONLDKeyword JSONLDVersion
-                             JSONLDContexts is_JSONLDContainerDef);
+                             JSONLDWildCard JSONLDContexts
+                             MaybeJSONLDTerm is_JSONLDContainerDef);
 
 use JSON              ();
 use Clone             ();
@@ -320,8 +321,7 @@ sub process {
     # parse out term definitions other than keywords
 
     # "Initialization of state variables in list context currently forbidden"
-    state %kw;
-    %kw = map { '@' . $_ => 1 } qw(base version vocab language);
+    my %kw = map { '@' . $_ => 1 } qw(base version vocab language);
 
     my %done;
     for my $term (grep { !$kw{$_} } keys %$ctx) {
@@ -334,6 +334,7 @@ sub process {
 }
 
 # https://json-ld.org/spec/latest/json-ld-api/#create-term-definition
+
 sub _create_term_definition {
     my ($self, $context, $term, $defined) = @_;
     $defined ||= {};
@@ -347,8 +348,7 @@ sub _create_term_definition {
     $defined->{$term} = 0;
 
     # 4.2.2.3
-    state %kw;
-    %kw ||= map { '@' . $_ => 1 }
+    my %kw = map { '@' . $_ => 1 }
         qw(base container context graph id index language list nest none
            prefix reverse set type value version vocab);
     JSON::LD::RDFa::Error::Conflict->new("Keyword redefinition: $term")
@@ -395,6 +395,7 @@ sub _create_term_definition {
         # 4.2.2.10.2
         $type = $self->_iri_expansion
             ($type, vocab => 1, context => $context, defined => $defined);
+        $type = URI->new($type) if defined $type and $type =~ /:/;
         JSON::LD::RDFa::Error::Invalid->throw("Invalid type mapping: $type")
               unless defined $type
                   and (is_URIRef($type) or $type =~ /^\@(id|vocab)$/);
@@ -623,6 +624,520 @@ sub _iri_expansion {
     # 4.3.2.8
     $value;
 }
+
+=head2 expand $JSON [, %PARAMS ]
+
+
+
+=cut
+
+# https://json-ld.org/spec/latest/json-ld-api/#expansion-algorithms
+
+# note the algorithm proper is separate from the interface because
+# there is an epilogue
+
+sub _expansion {
+    my ($self, $element, $property, $frame) = @_;
+    # 5.1.2.1
+    return unless defined $element;
+
+    # 5.1.2.2
+    $frame = 0 if defined $property and $property eq '@default';
+
+    # we reuse this a lot so this saves typing
+    my $ref = ref $element;
+
+    # 5.1.2.3
+    if (!$ref or Scalar::Util::blessed($element)) {
+        # note we treat blessed elements as scalars
+        return if !defined $property or $property eq '@graph';
+        return $self->_value_expansion($element, $property);
+    }
+
+    # do this once near the top
+    my %def = %{defined $property ? $self->terms->{$property} || {} : {}};
+
+    # 5.1.2.4
+    if ($ref eq 'ARRAY') {
+        # 5.1.2.4.1
+        my @result;
+        # 5.1.2.4.2
+        for my $item (@$element) {
+            # 5.1.2.4.2.1
+            $item = $self->_expansion($item, $property, $frame);
+            # 5.1.2.4.2.2
+            my $iref = ref $item || '';
+            my $list = $property and
+                ($property eq '@list'
+                     or grep { $_ eq '@list' } @{$def{container} || []});
+            JSON::LD::RDFa::Error::Invalid->throw('list of lists')
+                  if $list and
+                      ($iref eq 'ARRAY' or
+                           ($iref eq 'HASH' and exists $item->{'@list'}));
+            # 5.1.2.4.2.3
+            push @result, ($iref eq 'ARRAY' ? @$item : $item) if defined $item;
+        }
+        # 5.1.2.4.3
+        return \@result;
+    }
+
+    # 5.1.2.5
+    JSON::LD::RDFa::Error::Invalid->throw("Element $ref must be a HASH")
+          unless $ref eq 'HASH';
+
+    # 5.1.2.6
+    if (exists $element->{'@context'}) {
+        $self = $self->process($element->{'@context'});
+        # redefine def shorthand
+        %def = %{defined $property ? $self->terms->{$property} || {} : {}};
+    }
+
+    # 5.1.2.7 this is confusing af
+    for my $key (sort keys %$element) {
+        next unless $self->_iri_expansion($key, vocab => 1) eq '@type';
+        my $val = $element->{$key};
+        my $vr  = ref $val || '';
+        next unless !$vr or $vr eq 'ARRAY' or Scalar::Util::blessed($val);
+
+        # 5.1.2.7.1
+        for my $type (sort @{$vr eq 'ARRAY' ? $val : [$val]}) {
+            next unless my $d = $self->terms->{$type};
+            next unless $d->{context};
+            $self = $self->process($d->{context});
+        }
+        # redefine def shorthand
+        %def = %{defined $property ? $self->terms->{$property} || {} : {}};
+    }
+
+    # 5.1.2.8, 5.1.2.9
+    my $result = $self->_expand_dict($element, $property, $frame);
+
+    # 5.1.2.10
+    if (exists $result->{'@value'}) {
+        # 5.1.2.10.1
+        my $bad = exists $result->{'@type'} and exists $result->{'@language'};
+        unless ($bad) {
+            for my $k (keys %$result) {
+                unless (grep {$k eq $_ } qw(@value @language @type @index)) {
+                    $bad = 1;
+                    last;
+                }
+            }
+        }
+        JSON::LD::RDFa::Error::Invalid->throw('invalid value object') if $bad;
+
+        # 5.1.2.10.2
+        if (!defined $result->{'@value'}) {
+            # XXX we could return here since no additional processing occurs
+            undef $result;
+            return;
+            # the spec says set to null but that will make it hard to deal
+            # with. really the spec should just instruct to return null at
+            # 10.2, 13, 14.1 and 14.2, since it makes no sense to process
+            # any farther. nevertheless we will follow the spec to the
+            # letter.
+        }
+        # 5.1.2.10.3
+        elsif (exists $result->{'@language'} and
+                   not _is_quasi_scalar($result->{'@value'})) {
+            JSON::LD::RDFa::Error::Invalid->throw
+                  ('invalid language-tagged value');
+        }
+        # 5.1.2.10.4
+        elsif (defined $result->{'@type'}
+                   and not _is_quasi_scalar($result->{'@type'})) {
+            JSON::LD::RDFa::Error::Invalid->throw('invalid typed value');
+        }
+    }
+    # 5.1.2.11
+    elsif (exists $result->{'@type'} and ref $result->{'@type'} ne 'ARRAY') {
+        $result->{'@type'} = [$result->{'@type'}];
+    }
+    # 5.1.2.12
+    elsif (exists $result->{'@set'} or exists $result->{'@list'}) {
+        # 5.1.2.12.1
+        my $sk = scalar keys %$result;
+        JSON::LD::RDFa::Error::Invalid->throw('invalid set or list object')
+              unless $sk == 1 or $sk == 2 and exists $result->{'@index'};
+        # 5.1.2.12.2
+
+        # XXX THIS COULD BE AN ARRAYREF OR UNDEF OR SOMETHING ELSE
+        $result = $result->{'@set'} if exists $result->{'@set'};
+    }
+    # 5.1.2.13
+    elsif (keys %$result == 1 and exists $result->{'@language'}) {
+        undef $result;
+    }
+    # 5.1.2.14
+    elsif ((!defined $property or $property eq '@graph')
+               and ref $result eq 'HASH') {
+        my $sk = keys %$result;
+        # 5.1.2.14.1, 5.1.2.14.2
+        undef $result if $sk == 0 or exists $result->{'@value'}
+                or exists $result->{'@list'}
+                    or (!$frame and $sk == 1 and exists $result->{'@id'});
+    }
+
+    # 5.1.2.15
+    return $result;
+}
+
+# https://json-ld.org/spec/FCGS/json-ld-api/20180607/#alg-expand-each-key-value
+# https://json-ld.org/spec/latest/json-ld-api/#alg-expand-each-key-value
+# this is hairy and it recurses so it should be separated out
+sub _expand_dict {
+    my ($self, $element, $property, $frame, $result) = @_;
+    $frame  ||= 0;
+    $result ||= {};
+
+    my @nests;
+
+    # 5.1.2.9
+    for my $key (sort keys %$element) {
+        my $kdef  = $self->terms->{$key} || {};
+        my $value = $element->{$key};
+        # 5.1.2.9.1
+        next if $key eq '@context';
+        # 5.1.2.9.2
+        my $expkey = $self->_iri_expansion($key, vocab => 1);
+        # 5.2.1.9.3
+        next unless defined $expkey and $expkey =~ /^(@|.*:)/;
+        # 5.2.1.9.4
+        my $expval;
+        if ($expkey =~ /^@/) {
+            # 5.2.1.9.4.1
+            JSON::LD::RDFa::Error::Invalid->throw
+                  ("Invalid reverse property map: $property => $expkey")
+                      if $property and $property eq '@reverse';
+            # 5.1.2.9.4.2
+            JSON::LD::RDFa::Error::Conflict->throw
+                  ("Colliding keyword: $expkey") if exists $result->{$expkey};
+
+            # 5.1.2.9.4.3
+            if ($frame) {
+                # XXX no frame expansion for now
+                JSON::LD::RDFa::Error->throw('Frame expansion not implemented');
+            }
+            else {
+                JSON::LD::RDFa::Error::Invalid->throw
+                      ("Invalid \@id value: $value")
+                          if $expkey eq '@id' and !_is_quasi_scalar($value);
+                $expval = $self->_iri_expansion($value, relative => 1);
+            }
+            # 5.1.2.9.4.4
+            if ($expkey eq '@type') {
+                my $ok = _is_quasi_scalar($value) || is_JSONLDTerms($value);
+                $ok = $ok || _is_empty_hash($value) if $frame;
+                JSON::LD::RDFa::Error::Invalid->throw('invalid type value')
+                      unless $ok;
+                $expval = [$value] unless ref $value eq 'ARRAY';
+                $expval = [map { $self->_iri_expansion(
+                    $_, vocab => 1, relative => 1) } @$expval];
+            }
+            # 5.1.2.9.4.5
+            if ($expkey eq '@graph') {
+                $expval = $self->_expansion($value, '@graph', $frame);
+                $expval = [$expval] unless ref $expval eq 'ARRAY';
+            }
+            # 5.1.2.9.4.6
+            if ($expkey eq '@value') {
+                # XXX add frame logic
+                JSON::LD::RDFa::Error::Invalid->throw
+                      ('Invalid value object value')
+                          unless _is_quasi_scalar($value);
+                unless (defined ($expval = $value)) {
+                    $result->{'@value'} = undef;
+                    next;
+                }
+            }
+            # 5.1.2.9.4.7
+            if ($expkey eq '@language') {
+                # XXX add frame logic
+                JSON::LD::RDFa::Error::Invalid->throw
+                      ('Invalid language-tagged string')
+                          unless _is_quasi_scalar($value);
+                $expval = ref $value eq 'ARRAY' ? $value : [$value];
+            }
+            # 5.1.2.9.4.8
+            if ($expkey eq '@index') {
+                JSON::LD::RDFa::Error::Invalid->throw
+                      ('Invalid language-tagged string')
+                          unless _is_quasi_scalar($value);
+                $expval = ref $value eq 'ARRAY' ? $value : [$value];
+            }
+            # 5.1.2.9.4.9
+            if ($expkey eq '@list') {
+                # 5.1.2.9.4.9.1
+                next if !defined $property or $property eq '@graph';
+                # 5.1.2.9.4.9.2
+                $expval = $self->_expansion($value, $property, $frame);
+                # 5.1.2.9.4.9.3
+                JSON::LD::RDFa::Error::Conflict->throw('list of lists')
+                      if _is_list_object($expval);
+            }
+            # 5.1.2.9.4.10
+            $expval = $self->_expansion($value, $property, $frame)
+                if $expkey eq '@set';
+            # 5.1.2.9.4.11
+            if ($expkey eq '@reverse') {
+                JSON::LD::RDFa::Error::Invalid->throw('Invalid @reverse value')
+                      unless ref $value eq 'HASH';
+                # 5.1.2.9.4.11.1
+                $expval = $self->_expansion($value, '@reverse', $frame);
+                # 5.1.2.9.4.11.2
+                my $rev = $expval->{'@reverse'};
+                if ($rev) {
+                    # XXX this might not be a dictionary
+                    while (my ($k, $v) = each %$rev) {
+                        # 5.1.2.9.4.11.2.1
+                        my $x = $result->{$k} ||= [];
+                        # 5.1.2.9.4.11.2.2
+                        push @$x, $v;
+                    }
+                }
+                if ($rev and keys %$expval > 1 or !$rev and keys %$expval) {
+                    # 5.1.2.9.4.11.3.1, 5.1.2.9.4.11.3.2
+                    my $revmap = $result->{'@reverse'} ||= {};
+                    # 5.1.2.9.4.11.3.3
+                    while (my ($p, $items) = each %$rev) {
+                        next if $p eq '@reverse';
+                        # 5.1.2.9.4.11.3.3.1
+                        for my $i (@$items) {
+                            # 5.1.2.9.4.11.3.3.1.1
+                            JSON::LD::RDFa::Error::Invalid->throw
+                                  ('invalid reverse property value')
+                                      if _is_value_object($i)
+                                          or _is_list_object($i);
+                            # 5.1.2.9.4.11.3.3.1.2
+                            my $x = $revmap->{$p} ||= [];
+                            # 5.1.2.9.4.11.3.3.1.3
+                            push @$x, $i;
+                        }
+                    }
+                }
+                # 5.1.2.9.4.11.4
+                next;
+            }
+            # 5.1.2.9.4.12
+            if ($expkey eq '@nest') {
+                push @nests, $key;
+                next;
+            }
+            # 5.1.2.9.4.13
+            if ($frame and is_JSONLDFrameKeyword($expkey)) {
+                $expval = $self->_expansion($value, $property, $frame);
+            }
+            # 5.1.2.9.4.14
+            $result->{$expkey} = $expval if defined $expval;
+            # 5.1.2.9.4.15
+            next;
+        }
+        # 5.1.2.9.5
+        my $termctx = $kdef->{context} || $self;
+        # 5.1.2.9.6
+        my %ctrmap  = map { $_ => 1 } @{$kdef->{container} || []};
+        # 5.1.2.9.7
+        if ($ctrmap{'@language'} and ref $value eq 'HASH') {
+            # 5.1.2.9.7.1
+            $expval = [];
+            # 5.1.2.9.7.2
+            for my $lang (sort keys %$value) {
+                my $lval = $value->{$lang};
+                # 5.1.2.9.7.2.1
+                $lval = [$lval] unless ref $lval eq 'ARRAY';
+                # 5.1.2.9.7.2.2
+                for my $i (@$lval) {
+                    # 5.1.2.9.7.2.2.1
+                    JSON::LD::RDFa::Error::Invalid->throw
+                          ('invalid language map value')
+                              unless !defined $i or _is_quasi_scalar($i);
+                    # 5.1.2.9.7.2.2.2
+                    if (defined $i) {
+                        my %v = ('@value' => $i);
+                        $lang = $termctx->_iri_expansion($lang);
+                        $v{'@language'} = $lang if $lang and $lang ne '@none';
+                        push @$expval, \%v;
+                    }
+                }
+            }
+        }
+        # 5.1.2.9.8
+        elsif (grep { $ctrmap{$_} } qw(@index @type @id)
+                   and ref $value eq 'HASH') {
+            # 5.1.2.9.8.1
+            $expval = [];
+            # 5.1.2.9.8.2
+            for my $index (sort keys %$value) {
+                my $ival = $value->{$index};
+                my %idef = %{$termctx->terms->{$index} || {}};
+                # 5.1.2.9.8.2.1
+                my $mapctx = $ctrmap{'@type'} && $idef{context}
+                    ? $termctx->process($idef{context}) : $termctx;
+                # 5.1.2.9.8.2.2
+                my $iexp = $mapctx->_iri_expansion($index, vocab => 1);
+                # 5.1.2.9.8.2.3
+                $ival = [$ival] unless ref $ival eq 'ARRAY';
+                # 5.1.2.9.8.2.4
+                $ival = $mapctx->_expansion($ival, $key, $frame);
+                # 5.1.2.9.8.2.5
+                for my $item (@$ival) {
+                    # 5.1.2.9.8.2.5.1
+                    if ($ctrmap{'@graph'} and !_is_graph_object($item)) {
+                        my $x = ref $item eq 'ARRAY' ? $item : [$item];
+                        $item = { '@graph' => $x };
+                    }
+                    # 5.1.2.9.8.2.5.2
+                    if ($ctrmap{'@index'} and not exists $item->{'@index'}
+                            and $iexp ne '@none') {
+                        # XXX is the item a hashref?
+                        $item->{'@index'} = $index;
+                    }
+                    # 5.1.2.9.8.2.5.3
+                    elsif ($ctrmap{'@id'} and not exists $item->{'@id'}) {
+                        $item->{'@id'} = $iexp unless $iexp eq '@none';
+                    }
+                    # 5.1.2.9.8.2.5.4
+                    elsif ($ctrmap{'@type'}) {
+                        my $t = defined $item->{'@type'}
+                            ? $item->{'@type'} : [];
+                        my @types = @{ref $t eq 'ARRAY' ? @$t : [$t]};
+                        push @types, $iexp unless $iexp eq '@none'
+                            or grep { $_ eq $iexp } @types;
+                        $item->{'@type'} = \@types;
+                    }
+                    # 5.1.2.9.8.2.5.5
+                    push @$expval, $item;
+                }
+            }
+        }
+        else {
+            # 5.1.2.9.9
+            $expval = $termctx->expand($value, $key, $frame);
+        }
+
+        # 5.1.2.9.10
+        next unless defined $expval;
+
+        # 5.1.2.9.11
+        if ($ctrmap{'@list'} and not _is_list_object($expval)) {
+            $expval = [$expval] unless ref $expval eq 'ARRAY';
+            $expval = { '@list' => $expval };
+        }
+
+        # 5.1.2.9.12
+        if ($ctrmap{'@graph'}) {
+            $expval = [$expval] unless ref $expval eq 'ARRAY';
+            # 5.1.2.9.12.1
+            $expval = [map { [
+                _is_graph_object($_) ? $_ : { '@graph' => $_ } ] } @$expval];
+        }
+        # 5.1.2.9.13
+        elsif ($kdef->{reverse}) {
+            # 5.1.2.9.13.1, 5.1.2.9.13.2
+            my $revmap = $result->{'@reverse'} ||= {};
+            # 5.1.2.9.13.3
+            $expval = [$expval] unless ref $expval eq 'ARRAY';
+            # 5.1.2.9.13.4
+            for my $item (@$expval) {
+                # 5.1.2.9.13.4.1
+                JSON::LD::RDFa::Error::Invalid->throw
+                      ('invalid reverse property value')
+                          if _is_value_object($item) or _is_list_object($item);
+                # 5.1.2.9.13.4.2
+                my $irev = $revmap->{$expkey} ||= [];
+                # 5.1.2.9.13.4.3
+                push @$irev, $item;
+            }
+        }
+        # 5.1.2.9.14
+        else {
+            # 5.1.2.9.14.1
+            my $mem = $result->{$expkey} ||= [];
+            # XXX this is not mentioned but it should probably happen
+            $expval = [$expval] unless ref $expval eq 'ARRAY';
+            # 5.1.2.9.14.2
+            push @$mem, @$expval;
+        }
+    }
+
+    # XXX the following makes no sense to have in that big loop, even
+    # though that's how the spec reads.
+
+    # 5.1.2.9.15
+    for my $nkey (@nests) {
+        # 5.1.2.9.15.1
+        my $nv = $element->{$nkey};
+        for my $nval (@{ref $nv eq 'ARRAY' ? @$nv : [$nv]}) {
+            # 5.1.2.9.15.2.1
+            my $ok;
+            if (ref $nval eq 'HASH') {
+                my %nvk = map { $self->_iri_expansion($_, vocab => 1) => 1 }
+                    keys %$nval;
+                $ok = 1 unless $nvk{'@value'};
+            }
+
+            JSON::LD::RDFa::Error::Invalid->throw('invalid @nest value')
+                  unless $ok;
+            # 5.1.2.9.15.2.2
+            $self->_expand_dict($nval, $property, $frame, $result);
+        }
+    }
+
+    wantarray ? %$result : $result;
+}
+
+# XXX move these to ::Types?
+
+sub _is_empty_hash {
+    defined $_[0] and ref $_[0] eq 'HASH' and not keys %{$_[0]};
+}
+
+sub _is_quasi_scalar {
+    defined $_[0] and (!ref $_[0] or Scalar::Util::blessed($_[0]));
+}
+
+sub _is_list_object {
+    defined $_[0] and ref $_[0] eq 'HASH' and exists $_[0]{'@list'};
+}
+
+sub _is_value_object {
+    defined $_[0] and ref $_[0] eq 'HASH' and exists $_[0]{'@value'};
+}
+
+sub _is_graph_object {
+    defined $_[0] and ref $_[0] eq 'HASH' and exists $_[0]{'@graph'};
+}
+
+sub _value_expansion {
+}
+
+sub expand {
+    state $check = Type::Params::compile(
+        Invocant, JSONLDWildCard,
+        slurpy Dict[base     => Optional[MaybeURIRef],
+                    deref    => Optional[CodeRef],
+                    property => Optional[MaybeJSONLDTerm],
+                    frame    => Optional[Bool]]);
+
+    my ($self, $json, $params) = $check->(@_);
+
+    my $out = $self->_expansion($json, @{$params}{qw(property frame)});
+
+    # 5.1.2 epilogue: make sure $out is an arrayref
+    if (ref $out eq 'HASH' and keys %$out == 1 and $out->{'@graph'}) {
+        $out = $out->{'@graph'};
+    }
+    elsif (!defined $out) {
+        $out = [];
+    }
+    else {
+        $out = [$out];
+    }
+
+    # may as well add this too
+    wantarray ? @$out : $out;
+}
+
 
 =head2 seen $URI [, $MARK ]
 

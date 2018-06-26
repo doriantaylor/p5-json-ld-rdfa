@@ -11,7 +11,9 @@ use Type::Library -base,
     -declare => qw(URIRef MaybeURIRef MaybeLang
                    Namespace NamespaceMap JSONLD JSONLDVersion
                    JSONLDString JSONLDContext JSONLDContexts
-                   JSONLDRemoteContext JSONLDKeyword JSONLDContainerDef
+                   JSONLDRemoteContext JSONLDKeyword JSONLDFrameKeyword
+                   JSONLDTerm MaybeJSONLDTerm JSONLDTerms
+                   JSONLDContainerDef JSONLDWildCard
               );
 use JSON;
 use URI;
@@ -115,9 +117,31 @@ coerce JSONLDContexts, from HashRef,      via { [to_JSONLDContext($_)] };
 coerce JSONLDContexts, from Value,        via { [to_URIRef($_)] };
 # coerce JSONLDContexts, from JSONLDString, via { [to_JSONLDContext($_)] };
 
+=head3 JSONLDKeyword
+
+=cut
+
 declare JSONLDKeyword, as Enum[
     map { '@' . $_ } qw(base container context graph id index language list
                         nest none prefix reverse set type value version vocab)];
+
+declare JSONLDFrameKeyword, as Enum[
+    map { '@' . $_ } qw(default embed explicit omitDefault requireAll)];
+
+=head3 JSONLDTerm, MaybeJSONLDTerm
+
+=cut
+
+declare JSONLDTerm, as JSONLDKeyword|URIRef|Str, where {
+    Scalar::Util::blessed($_) or is_JSONLDKeyword($_) or $_ !~ /[@[:space:]]/ };
+
+declare MaybeJSONLDTerm, as Maybe[JSONLDTerm];
+
+declare JSONLDTerms, as ArrayRef[JSONLDTerm];
+
+=head3 JSONLDContainerDef
+
+=cut
 
 my @TESTS = (
     [qw(graph id)],
@@ -139,6 +163,16 @@ declare JSONLDContainerDef, as ArrayRef[JSONLDKeyword], where {
     }
 
     return;
+};
+
+=head3 JSONLDWildCard
+
+=cut
+
+declare JSONLDWildCard, as JSONLD|URIRef|ArrayRef[JSONLD|URIRef], coercion => 1;
+coerce JSONLDWildCard, from ScalarRef, via \&_coerce_jsonld;
+coerce JSONLDWildCard, from Value, via {
+    is_JSONLDString($_) ? _coerce_jsonld($_) : _coerce_uri($_);
 };
 
 1;
