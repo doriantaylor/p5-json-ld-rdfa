@@ -763,6 +763,7 @@ sub _expansion {
 
         # XXX THIS COULD BE AN ARRAYREF OR UNDEF OR SOMETHING ELSE
         $result = $result->{'@set'} if exists $result->{'@set'};
+        # you could actually return from here
     }
     # 5.1.2.13
     elsif (keys %$result == 1 and exists $result->{'@language'}) {
@@ -1108,7 +1109,45 @@ sub _is_graph_object {
     defined $_[0] and ref $_[0] eq 'HASH' and exists $_[0]{'@graph'};
 }
 
+#https://json-ld.org/spec/FCGS/json-ld-api/20180607/#value-expansion
 sub _value_expansion {
+    # 5.2.2
+    my ($self, $value, $property) = @_;
+
+    my %def = %{$self->terms->{$property} || {}};
+
+    my $scalar = _is_quasi_scalar($value);
+
+    # 5.2.2.1
+    if (defined $def{type} and $def{type} eq '@id' and $scalar) {
+        return { '@id' => $self->_iri_expansion($value, relative => 1) };
+    }
+    # 5.2.2.2
+    elsif (defined $def{type} and $def{type} eq '@vocab' and $scalar) {
+        return {
+            '@id' => $self->_iri_expansion($value, vocab => 1, relative => 1) };
+    }
+
+    # 5.2.2.3
+    my $result = { '@value' => $value };
+    # 5.2.2.4
+    if (defined $def{type} and !grep { $def{type} } qw(@id @vocab)) {
+        $result->{'@type'} = $def{type};
+    }
+    # 5.2.2.5
+    elsif ($scalar) {
+        # 5.2.2.5.1
+        if (exists $def{language}) {
+            $result->{'@language'} = $def{language} if defined $def{language};
+        }
+        # 5.2.2.5.2
+        elsif (my $lang = $self->language) {
+            $result->{'@language'} = $lang;
+        }
+    }
+
+    # 5.2.2.6
+    $result;
 }
 
 sub expand {
