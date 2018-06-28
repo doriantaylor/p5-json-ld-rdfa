@@ -618,6 +618,7 @@ sub _iri_expansion {
     if (my $t = $terms->{$value}) {
         # 4.3.2.3, 4.3.2.4
         my $i = $t->{iri};
+        warn $i;
         return $i if defined $i and ($i =~ /^@/ or $opts{vocab});
     }
 
@@ -834,26 +835,43 @@ sub _expand_dict {
             JSON::LD::RDFa::Error::Conflict->throw
                   ("Colliding keyword: $expkey") if exists $result->{$expkey};
 
+            # NOTE these keys are necessarily disjoint so i would
+            # normally make this a dispatch table but eh /shrug
+
             # 5.1.2.9.4.3
-            if ($frame) {
-                # XXX no frame expansion for now
-                JSON::LD::RDFa::Error->throw('Frame expansion not implemented');
-            }
-            else {
+            if ($expkey eq '@id') {
+                my $ok = _is_quasi_scalar($value);
+                $ok ||= (_is_empty_hash($value) or is_JSONLDTerms($value))
+                    if $frame;
                 JSON::LD::RDFa::Error::Invalid->throw
-                      ("Invalid \@id value: $value")
-                          if $expkey eq '@id' and !_is_quasi_scalar($value);
+                      ("Invalid \@id value: $value") unless $ok;
+
                 $expval = $self->_iri_expansion($value, relative => 1);
             }
+
             # 5.1.2.9.4.4
             if ($expkey eq '@type') {
                 my $ok = _is_quasi_scalar($value) || is_JSONLDTerms($value);
                 $ok = $ok || _is_empty_hash($value) if $frame;
                 JSON::LD::RDFa::Error::Invalid->throw('invalid type value')
                       unless $ok;
-                $expval = [$value] unless ref $value eq 'ARRAY';
-                $expval = [map { $self->_iri_expansion(
-                    $_, vocab => 1, relative => 1) } @$expval];
+
+                # XXX this is bad. see:
+                # https://github.com/json-ld/json-ld.org/issues/662
+
+                # $expval = [$value] unless ref $value eq 'ARRAY';
+                # $expval = [map { $self->_iri_expansion(
+                #     $_, vocab => 1, relative => 1) } @$expval];
+
+                # this is slightly better
+                if (ref $value eq 'ARRAY') {
+                    $expval = [map { $self->_iri_expansion(
+                        $_, vocab => 1, relative => 1) } @$value];
+                }
+                else {
+                    $expval = $self->_iri_expansion
+                        ($value, vocab => 1, relative => 1);
+                }
             }
             # 5.1.2.9.4.5
             if ($expkey eq '@graph') {
@@ -1106,11 +1124,11 @@ sub _expand_dict {
         }
     }
 
-    # XXX sorted, right?
-    if ($result->{'@type'} and $result->{'@value'}) {
-        my $t = $result->{'@type'};
-        $result->{'@type'} = $t->[0] if ref $t eq 'ARRAY';
-    }
+    # XXX see remedy on 5.1.2.9.4.4
+    $result->{'@type'} = [$result->{'@type'}]
+        if defined $result->{'@type'}
+                and not defined $result->{'@value'}
+                    and ref $result->{'@type'} ne 'ARRAY';
 
     wantarray ? %$result : $result;
 }
