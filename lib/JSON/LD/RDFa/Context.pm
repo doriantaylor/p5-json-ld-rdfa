@@ -213,6 +213,34 @@ sub _maybe_clone {
     Clone::clone($thing);
 }
 
+sub _disassemble_context {
+    my ($self, $p, $clone) = @_;
+    # the basics
+    $p->{base}     = _maybe_clone($self->base,  $clone) if $self->base;
+    $p->{vocab}    = _maybe_clone($self->vocab, $clone) if $self->vocab;
+    $p->{language} = $self->language if $self->language;
+    $p->{version}  = $self->version  if $self->version;
+    $p->{deref}    = $self->deref    if $self->deref;
+
+    # deal with the namespace map
+    $p->{ns} = $self->ns;
+    if ($clone) {
+        my $ns = $p->{ns} = URI::NamespaceMap->new;
+        while (my ($k, $v) = $self->ns->each_map) {
+            $ns->add_mapping($k, $v->as_string);
+        }
+    }
+
+    # deal with the remaining term map
+    my $terms = $p->{terms} ||= {};
+    while (my ($k, $v) = each %{_maybe_clone($self->terms, $clone)}) {
+        $terms->{$k} = $v;
+    }
+
+    # meh
+    $p;
+}
+
 # https://json-ld.org/spec/latest/json-ld-api/#context-processing-algorithm
 sub process {
     # one-time compilation of input sanitation function
@@ -235,29 +263,16 @@ sub process {
     # constructor; otherwise if we just call it as an instance method
     # in a tail recursion it should pretty much do what we want
 
-    my $class = ref $self || $self;
+    my $class = ref $self;
     my %p;
 
-    # if this is called from an instance, clone all the existing bits
-    if (ref $self) {
-        # the basics
-        $p{base}     = _maybe_clone($self->base,  $clone) if $self->base;
-        $p{vocab}    = _maybe_clone($self->vocab, $clone) if $self->vocab;
-        $p{language} = $self->language if $self->language;
-        $p{version}  = $self->version  if $self->version;
-        $p{deref}    = $self->deref    if $self->deref;
-
-        # deal with the namespace map
-        $p{ns} = $self->ns;
-        if ($clone) {
-            my $ns = $p{ns} = URI::NamespaceMap->new;
-            while (my ($k, $v) = $self->ns->each_map) {
-                $ns->add_mapping($k, $v->as_string);
-            }
-        }
-
-        # deal with the remaining term map
-        $p{terms} = _maybe_clone($self->terms, $clone);
+    if ($class) {
+        # if this is called from an instance, clone all the existing bits
+        $self->_disassemble_context(\%p, $clone);
+    }
+    else {
+        # otherwise this is a class method
+        $class = $self;
     }
 
     # overwrite these members
@@ -269,14 +284,21 @@ sub process {
 
     # dereference the context if it is remote
     my $is_remote;
-    if (Scalar::Util::blessed($ctx) and $ctx->isa('URI')) {
-        $ctx = URI->new_abs($ctx, $p{base}) if $p{base};
+    if (Scalar::Util::blessed($ctx)) {
+        if ($ctx->isa('URI')) {
+            $ctx = URI->new_abs($ctx, $p{base}) if $p{base};
 
-        # XXX lol
-        JSON::LD::RDFa::Error::Unimplemented->throw('No remote contexts yet');
+            # XXX lol
+            JSON::LD::RDFa::Error::Unimplemented->throw
+                  ('No remote contexts yet');
 
-        # if this returns an ARRAY make sure it is unshifted onto the
-        # front of the context list
+            # if this returns an ARRAY make sure it is unshifted onto the
+            # front of the context list
+        }
+        elsif ($ctx->isa(__PACKAGE__)) {
+            $ctx->_disassemble_context(\%p, $clone);
+            return $class->new(%p);
+        }
     }
 
     # deal with base
@@ -715,14 +737,11 @@ sub _expansion {
     # 5.1.2.10
     if (exists $result->{'@value'}) {
         # 5.1.2.10.1
-        my $bad = exists $result->{'@type'} and exists $result->{'@language'};
+        my $bad = (exists $result->{'@type'} and exists $result->{'@language'});
         unless ($bad) {
-            for my $k (keys %$result) {
-                unless (grep {$k eq $_ } qw(@value @language @type @index)) {
-                    $bad = 1;
-                    last;
-                }
-            }
+            my %tmp = %$result;
+            map { delete $tmp{$_} } qw(@value @language @type @index);
+            $bad = 1 if keys %tmp;
         }
         JSON::LD::RDFa::Error::Invalid->throw('invalid value object') if $bad;
 
@@ -746,6 +765,7 @@ sub _expansion {
         # 5.1.2.10.4
         elsif (defined $result->{'@type'}
                    and not _is_quasi_scalar($result->{'@type'})) {
+            warn Data::Dumper::Dumper($result);
             JSON::LD::RDFa::Error::Invalid->throw('invalid typed value');
         }
     }
@@ -857,7 +877,9 @@ sub _expand_dict {
                 JSON::LD::RDFa::Error::Invalid->throw
                       ('Invalid language-tagged string')
                           unless _is_quasi_scalar($value);
-                $expval = ref $value eq 'ARRAY' ? $value : [$value];
+                # XXX this is wrong!!!
+                #$expval = ref $value eq 'ARRAY' ? $value : [$value];
+                $expval = $value;
             }
             # 5.1.2.9.4.8
             if ($expkey eq '@index') {
@@ -1013,7 +1035,7 @@ sub _expand_dict {
         }
         else {
             # 5.1.2.9.9
-            $expval = $termctx->expand($value, $key, $frame);
+            $expval = $termctx->_expansion($value, $key, $frame);
         }
 
         # 5.1.2.9.10
@@ -1082,6 +1104,12 @@ sub _expand_dict {
             # 5.1.2.9.15.2.2
             $self->_expand_dict($nval, $property, $frame, $result);
         }
+    }
+
+    # XXX sorted, right?
+    if ($result->{'@type'} and $result->{'@value'}) {
+        my $t = $result->{'@type'};
+        $result->{'@type'} = $t->[0] if ref $t eq 'ARRAY';
     }
 
     wantarray ? %$result : $result;
@@ -1159,6 +1187,13 @@ sub expand {
                     frame    => Optional[Bool]]);
 
     my ($self, $json, $params) = $check->(@_);
+
+    unless (ref $self) {
+        my %p;
+        $p{base}  = $params->{base}  if defined $params->{base};
+        $p{deref} = $params->{deref} if defined $params->{deref};
+        $self = $self->new(%p);
+    }
 
     my $out = $self->_expansion($json, @{$params}{qw(property frame)});
 

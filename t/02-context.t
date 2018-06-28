@@ -121,7 +121,9 @@ my $ctr = JSON::decode_json(<<'CTX');
 }
 CTX
 
-my $ctx = JSON::LD::RDFa::Context->process($ctr); #($person->{'@context'});
+my $ctx = JSON::LD::RDFa::Context->process($person->{'@context'});
+#my $huh = $ctx->expand($ctr);
+
 
 require Data::Dumper;
-warn Data::Dumper::Dumper($ctx);
+warn Data::Dumper::Dumper($ctr);

@@ -10,7 +10,7 @@ use Type::Utils -all;
 use Type::Library -base,
     -declare => qw(URIRef MaybeURIRef MaybeLang
                    Namespace NamespaceMap JSONLD JSONLDVersion
-                   JSONLDString JSONLDContext JSONLDContexts
+                   JSONLDString JSONLDContext JSONLDContextObj JSONLDContexts
                    JSONLDRemoteContext JSONLDKeyword JSONLDFrameKeyword
                    JSONLDTerm MaybeJSONLDTerm JSONLDTerms
                    JSONLDContainerDef JSONLDWildCard
@@ -99,6 +99,12 @@ declare JSONLDContext, as Dict[
 
 # coerce JSONLDContext, from JSONLDString, via { to_JSONLD($_) };
 
+=head3 JSONLDContextObj
+
+=cut
+
+class_type JSONLDContextObj, { class => 'JSON::LD::RDFa::Context' };
+
 =head3 JSONLDRemoteContext
 
 =cut
@@ -110,11 +116,13 @@ declare JSONLDRemoteContext, as Dict[
 
 =cut
 
-declare JSONLDContexts, as ArrayRef[Maybe[JSONLDContext|URIRef]], coercion => 1;
+declare JSONLDContexts,
+    as ArrayRef[Maybe[JSONLDContext|JSONLDContextObj|URIRef]], coercion => 1;
 
-coerce JSONLDContexts, from Undef,        via { [undef] };
-coerce JSONLDContexts, from HashRef,      via { [to_JSONLDContext($_)] };
-coerce JSONLDContexts, from Value,        via { [to_URIRef($_)] };
+coerce JSONLDContexts, from JSONLDContextObj, via { [$_] };
+coerce JSONLDContexts, from Undef,            via { [undef] };
+coerce JSONLDContexts, from HashRef,          via { [to_JSONLDContext($_)] };
+coerce JSONLDContexts, from Value,            via { [to_URIRef($_)] };
 # coerce JSONLDContexts, from JSONLDString, via { [to_JSONLDContext($_)] };
 
 =head3 JSONLDKeyword
@@ -170,9 +178,9 @@ declare JSONLDContainerDef, as ArrayRef[JSONLDKeyword], where {
 =cut
 
 declare JSONLDWildCard, as JSONLD|URIRef|ArrayRef[JSONLD|URIRef], coercion => 1;
-coerce JSONLDWildCard, from ScalarRef, via \&_coerce_jsonld;
 coerce JSONLDWildCard, from Value, via {
     is_JSONLDString($_) ? _coerce_jsonld($_) : _coerce_uri($_);
 };
+#coerce JSONLDWildCard, from ScalarRef, via \&_coerce_jsonld;
 
 1;
