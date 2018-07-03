@@ -699,7 +699,10 @@ sub _iri_expansion {
 # there is an epilogue
 
 sub _expansion {
-    my ($self, $element, $property, $frame, $clone) = @_;
+    my ($self, $element, $property, %p) = @_;
+    my $frame = $p{frame};
+    my $clone = $p{clone};
+
     # 5.1.2.1
     return unless defined $element;
 
@@ -726,7 +729,7 @@ sub _expansion {
         # 5.1.2.4.2
         for my $item (@$element) {
             # 5.1.2.4.2.1
-            $item = $self->_expansion($item, $property, $frame, $clone);
+            $item = $self->_expansion($item, $property, %p);
             # 5.1.2.4.2.2
             my $iref = ref $item || '';
             my $list = $property and
@@ -749,7 +752,7 @@ sub _expansion {
 
     # 5.1.2.6
     if (exists $element->{'@context'}) {
-        $self = $self->process($element->{'@context'}, clone => 0);
+        $self = $self->process($element->{'@context'}, merge => 1, clone => 0);
         # redefine def shorthand
         %def = %{defined $property ? $self->terms->{$property} || {} : {}};
     }
@@ -772,7 +775,8 @@ sub _expansion {
     }
 
     # 5.1.2.8, 5.1.2.9
-    my $result = $self->_expand_dict($element, $property, $frame, $clone);
+    my $result = $self->_expand_dict
+        ($element, $property, map { $_ => $p{$_} } qw(frame clone merge));
 
     # 5.1.2.10
     if (exists $result->{'@value'}) {
@@ -847,9 +851,9 @@ sub _expansion {
 # https://json-ld.org/spec/latest/json-ld-api/#alg-expand-each-key-value
 # this is hairy and it recurses so it should be separated out
 sub _expand_dict {
-    my ($self, $element, $property, $frame, $clone, $result) = @_;
-    $frame  ||= 0;
-    $result ||= {};
+    my ($self, $element, $property, %p) = @_;
+    my $frame  = $p{frame}  ||= 0;
+    my $result = $p{result} ||= {};
 
     my @nests;
 
@@ -914,7 +918,7 @@ sub _expand_dict {
             }
             # 5.1.2.9.4.5
             if ($expkey eq '@graph') {
-                $expval = $self->_expansion($value, '@graph', $frame, $clone);
+                $expval = $self->_expansion($value, '@graph', %p);
                 $expval = [$expval] unless ref $expval eq 'ARRAY';
             }
             # 5.1.2.9.4.6
@@ -950,20 +954,20 @@ sub _expand_dict {
                 # 5.1.2.9.4.9.1
                 next if !defined $property or $property eq '@graph';
                 # 5.1.2.9.4.9.2
-                $expval = $self->_expansion($value, $property, $frame, $clone);
+                $expval = $self->_expansion($value, $property, %p);
                 # 5.1.2.9.4.9.3
                 JSON::LD::RDFa::Error::Conflict->throw('list of lists')
                       if _is_list_object($expval);
             }
             # 5.1.2.9.4.10
-            $expval = $self->_expansion($value, $property, $frame, $clone)
+            $expval = $self->_expansion($value, $property, %p)
                 if $expkey eq '@set';
             # 5.1.2.9.4.11
             if ($expkey eq '@reverse') {
                 JSON::LD::RDFa::Error::Invalid->throw('Invalid @reverse value')
                       unless ref $value eq 'HASH';
                 # 5.1.2.9.4.11.1
-                $expval = $self->_expansion($value, '@reverse', $frame, $clone);
+                $expval = $self->_expansion($value, '@reverse', %p);
                 # 5.1.2.9.4.11.2
                 my $rev = $expval->{'@reverse'};
                 if ($rev) {
@@ -1005,7 +1009,7 @@ sub _expand_dict {
             }
             # 5.1.2.9.4.13
             if ($frame and is_JSONLDFrameKeyword($expkey)) {
-                $expval = $self->_expansion($value, $property, $frame, $clone);
+                $expval = $self->_expansion($value, $property, %p);
             }
             # 5.1.2.9.4.14
             $result->{$expkey} = $expval if defined $expval;
@@ -1058,7 +1062,7 @@ sub _expand_dict {
                 # 5.1.2.9.8.2.3
                 $ival = [$ival] unless ref $ival eq 'ARRAY';
                 # 5.1.2.9.8.2.4
-                $ival = $mapctx->_expansion($ival, $key, $frame, $clone);
+                $ival = $mapctx->_expansion($ival, $key, %p);
                 # 5.1.2.9.8.2.5
                 for my $item (@$ival) {
                     # 5.1.2.9.8.2.5.1
@@ -1092,7 +1096,7 @@ sub _expand_dict {
         }
         else {
             # 5.1.2.9.9
-            $expval = $termctx->_expansion($value, $key, $frame);
+            $expval = $termctx->_expansion($value, $key, %p);
         }
 
         # 5.1.2.9.10
@@ -1159,7 +1163,7 @@ sub _expand_dict {
             JSON::LD::RDFa::Error::Invalid->throw('invalid @nest value')
                   unless $ok;
             # 5.1.2.9.15.2.2
-            $self->_expand_dict($nval, $property, $frame, $clone, $result);
+            $self->_expand_dict($nval, $property, %p, result => $result);
         }
     }
 
@@ -1251,11 +1255,13 @@ sub expand {
         my %p;
         $p{base}  = $params->{base}  if defined $params->{base};
         $p{deref} = $params->{deref} if defined $params->{deref};
-        $p{clone} = $params->{clone} if defined $params->{clone};
         $self = $self->new(%p);
     }
 
-    my $out = $self->_expansion($json, @{$params}{qw(property frame clone)});
+    my %exp = map { $_ => $params->{$_} }
+        grep { $_ !~ /^(property)$/ } keys %$params;
+
+    my $out = $self->_expansion($json, $params->{property}, %exp);
 
     # 5.1.2 epilogue: make sure $out is an arrayref
     if (ref $out eq 'HASH' and keys %$out == 1 and $out->{'@graph'}) {
