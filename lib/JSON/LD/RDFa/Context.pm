@@ -11,9 +11,9 @@ use Types::Standard qw(slurpy Any Maybe Optional ArrayRef HashRef CodeRef
                        Dict Bool);
 
 use JSON::LD::RDFa::Error;
-use JSON::LD::RDFa::Types qw(URIRef is_URIRef MaybeURIRef MaybeLang
-                             NamespaceMap is_JSONLDKeyword JSONLDVersion
-                             JSONLDWildCard JSONLDContexts
+use JSON::LD::RDFa::Types qw(URIRef is_URIRef MaybeURIRef is_MaybeURIRef
+                             MaybeLang NamespaceMap is_JSONLDKeyword
+                             JSONLDVersion JSONLDWildCard JSONLDContexts
                              MaybeJSONLDTerm is_JSONLDContainerDef);
 
 use JSON              ();
@@ -138,6 +138,7 @@ sub _no_deref {
 has deref => (
     is      => 'ro',
     isa     => CodeRef,
+    coerce  => sub { defined $_ ? $_ : \&_no_deref },
     default => sub { \&_no_deref },
 );
 
@@ -245,10 +246,12 @@ sub _disassemble_context {
 sub process {
     # one-time compilation of input sanitation function
     state $check = compile(Invocant, JSONLDContexts, slurpy Dict[
-        base  => Optional[MaybeURIRef],
-        deref => Optional[CodeRef],
-        mode  => Optional[JSONLDVersion],
-        clone => Optional[Bool],
+        base    => Optional[MaybeURIRef],
+        deref   => Optional[CodeRef],
+        mode    => Optional[JSONLDVersion],
+        clone   => Optional[Bool],
+        merge   => Optional[Bool],
+        clobber => Optional[Bool],
         slurpy Any]);
 
     # sanitize input
@@ -258,6 +261,8 @@ sub process {
     my $base  = $opts->{base};
     my $deref = $opts->{deref};
     my $clone = exists($opts->{clone}) ? $opts->{clone} : ($opts->{clone} = 1);
+    my $merge = $opts->{merge};
+    my $clobber = $opts->{clobber};
 
     # the only special case is when this thing is called as a
     # constructor; otherwise if we just call it as an instance method
@@ -275,12 +280,47 @@ sub process {
         $class = $self;
     }
 
-    # overwrite these members
+    # overwrite these if applicable
     $p{base}  = $base  if $base;
     $p{deref} = $deref if $deref;
 
-    # now we shift off the first context and process it
-    my $ctx = shift @$ctxs or return $class->new(%p);
+    my $out;
+    for my $ctx (@$ctxs) {
+        $out = $self->_process_one($ctx, %p, clone => $clone);
+        if ($merge) {
+            # scalars
+            for my $method (qw(base vocab language version)) {
+                next unless !defined($self->$method) || $clobber;
+                my $val = _maybe_clone($out->$method, $clone);
+                $self->$method($val) if defined $val;
+            }
+
+            # namespaces
+            my $ns = $self->ns;
+            while (my ($p, $u) = $out->ns->each_map) {
+                next unless !$ns->namespace_uri($p) || $clobber;
+                $ns->add_mapping($p, _maybe_clone($u, $clone));
+            }
+
+            # terms
+            my $st = $out->terms;
+            my $tt = $self->terms;
+            for my $term (keys %$st) {
+                next unless !$tt->{$term} || $clobber;
+                $st->{$term} = _maybe_clone($st->{$term}, $clone);
+            }
+        }
+    }
+
+    $out;
+}
+
+sub _process_one {
+    my ($self, $ctx, %p) = @_;
+
+    my $class = ref $self || $self;
+    my $clone = delete $p{clone};
+    my $base  = $p{base};
 
     # dereference the context if it is remote
     my $is_remote;
@@ -351,8 +391,7 @@ sub process {
         $new->_create_term_definition($ctx, $term, \%done);
     }
 
-    # we don't need to clone if there are other contexts as 
-    @$ctxs ? $new->process($ctxs, %$opts, clone => 0) : $new;
+    $new;
 }
 
 # https://json-ld.org/spec/latest/json-ld-api/#create-term-definition
@@ -618,7 +657,7 @@ sub _iri_expansion {
     if (my $t = $terms->{$value}) {
         # 4.3.2.3, 4.3.2.4
         my $i = $t->{iri};
-        warn $i;
+        #warn $i;
         return $i if defined $i and ($i =~ /^@/ or $opts{vocab});
     }
 
@@ -660,7 +699,7 @@ sub _iri_expansion {
 # there is an epilogue
 
 sub _expansion {
-    my ($self, $element, $property, $frame) = @_;
+    my ($self, $element, $property, $frame, $clone) = @_;
     # 5.1.2.1
     return unless defined $element;
 
@@ -687,7 +726,7 @@ sub _expansion {
         # 5.1.2.4.2
         for my $item (@$element) {
             # 5.1.2.4.2.1
-            $item = $self->_expansion($item, $property, $frame);
+            $item = $self->_expansion($item, $property, $frame, $clone);
             # 5.1.2.4.2.2
             my $iref = ref $item || '';
             my $list = $property and
@@ -710,7 +749,7 @@ sub _expansion {
 
     # 5.1.2.6
     if (exists $element->{'@context'}) {
-        $self = $self->process($element->{'@context'});
+        $self = $self->process($element->{'@context'}, clone => 0);
         # redefine def shorthand
         %def = %{defined $property ? $self->terms->{$property} || {} : {}};
     }
@@ -733,7 +772,7 @@ sub _expansion {
     }
 
     # 5.1.2.8, 5.1.2.9
-    my $result = $self->_expand_dict($element, $property, $frame);
+    my $result = $self->_expand_dict($element, $property, $frame, $clone);
 
     # 5.1.2.10
     if (exists $result->{'@value'}) {
@@ -766,7 +805,7 @@ sub _expansion {
         # 5.1.2.10.4
         elsif (defined $result->{'@type'}
                    and not _is_quasi_scalar($result->{'@type'})) {
-            warn Data::Dumper::Dumper($result);
+            #warn Data::Dumper::Dumper($result);
             JSON::LD::RDFa::Error::Invalid->throw('invalid typed value');
         }
     }
@@ -808,7 +847,7 @@ sub _expansion {
 # https://json-ld.org/spec/latest/json-ld-api/#alg-expand-each-key-value
 # this is hairy and it recurses so it should be separated out
 sub _expand_dict {
-    my ($self, $element, $property, $frame, $result) = @_;
+    my ($self, $element, $property, $frame, $clone, $result) = @_;
     $frame  ||= 0;
     $result ||= {};
 
@@ -875,7 +914,7 @@ sub _expand_dict {
             }
             # 5.1.2.9.4.5
             if ($expkey eq '@graph') {
-                $expval = $self->_expansion($value, '@graph', $frame);
+                $expval = $self->_expansion($value, '@graph', $frame, $clone);
                 $expval = [$expval] unless ref $expval eq 'ARRAY';
             }
             # 5.1.2.9.4.6
@@ -911,20 +950,20 @@ sub _expand_dict {
                 # 5.1.2.9.4.9.1
                 next if !defined $property or $property eq '@graph';
                 # 5.1.2.9.4.9.2
-                $expval = $self->_expansion($value, $property, $frame);
+                $expval = $self->_expansion($value, $property, $frame, $clone);
                 # 5.1.2.9.4.9.3
                 JSON::LD::RDFa::Error::Conflict->throw('list of lists')
                       if _is_list_object($expval);
             }
             # 5.1.2.9.4.10
-            $expval = $self->_expansion($value, $property, $frame)
+            $expval = $self->_expansion($value, $property, $frame, $clone)
                 if $expkey eq '@set';
             # 5.1.2.9.4.11
             if ($expkey eq '@reverse') {
                 JSON::LD::RDFa::Error::Invalid->throw('Invalid @reverse value')
                       unless ref $value eq 'HASH';
                 # 5.1.2.9.4.11.1
-                $expval = $self->_expansion($value, '@reverse', $frame);
+                $expval = $self->_expansion($value, '@reverse', $frame, $clone);
                 # 5.1.2.9.4.11.2
                 my $rev = $expval->{'@reverse'};
                 if ($rev) {
@@ -966,7 +1005,7 @@ sub _expand_dict {
             }
             # 5.1.2.9.4.13
             if ($frame and is_JSONLDFrameKeyword($expkey)) {
-                $expval = $self->_expansion($value, $property, $frame);
+                $expval = $self->_expansion($value, $property, $frame, $clone);
             }
             # 5.1.2.9.4.14
             $result->{$expkey} = $expval if defined $expval;
@@ -1019,7 +1058,7 @@ sub _expand_dict {
                 # 5.1.2.9.8.2.3
                 $ival = [$ival] unless ref $ival eq 'ARRAY';
                 # 5.1.2.9.8.2.4
-                $ival = $mapctx->_expansion($ival, $key, $frame);
+                $ival = $mapctx->_expansion($ival, $key, $frame, $clone);
                 # 5.1.2.9.8.2.5
                 for my $item (@$ival) {
                     # 5.1.2.9.8.2.5.1
@@ -1120,15 +1159,15 @@ sub _expand_dict {
             JSON::LD::RDFa::Error::Invalid->throw('invalid @nest value')
                   unless $ok;
             # 5.1.2.9.15.2.2
-            $self->_expand_dict($nval, $property, $frame, $result);
+            $self->_expand_dict($nval, $property, $frame, $clone, $result);
         }
     }
 
     # XXX see remedy on 5.1.2.9.4.4
-    $result->{'@type'} = [$result->{'@type'}]
-        if defined $result->{'@type'}
-                and not defined $result->{'@value'}
-                    and ref $result->{'@type'} ne 'ARRAY';
+    # $result->{'@type'} = [$result->{'@type'}]
+    #     if defined $result->{'@type'}
+    #             and not defined $result->{'@value'}
+    #                 and ref $result->{'@type'} ne 'ARRAY';
 
     wantarray ? %$result : $result;
 }
@@ -1201,6 +1240,8 @@ sub expand {
         Invocant, JSONLDWildCard,
         slurpy Dict[base     => Optional[MaybeURIRef],
                     deref    => Optional[CodeRef],
+                    clone    => Optional[Bool],
+                    merge    => Optional[Bool],
                     property => Optional[MaybeJSONLDTerm],
                     frame    => Optional[Bool]]);
 
@@ -1210,10 +1251,11 @@ sub expand {
         my %p;
         $p{base}  = $params->{base}  if defined $params->{base};
         $p{deref} = $params->{deref} if defined $params->{deref};
+        $p{clone} = $params->{clone} if defined $params->{clone};
         $self = $self->new(%p);
     }
 
-    my $out = $self->_expansion($json, @{$params}{qw(property frame)});
+    my $out = $self->_expansion($json, @{$params}{qw(property frame clone)});
 
     # 5.1.2 epilogue: make sure $out is an arrayref
     if (ref $out eq 'HASH' and keys %$out == 1 and $out->{'@graph'}) {

@@ -11,11 +11,12 @@ use Type::Params    qw(compile Invocant);
 use Types::Standard qw(slurpy Any Maybe Optional ArrayRef HashRef CodeRef
                        Dict Bool);
 
+use JSON::LD::RDFa::Context;
 use JSON::LD::RDFa::Error;
 use JSON::LD::RDFa::Types qw(URIRef is_URIRef MaybeURIRef MaybeLang
                              NamespaceMap is_JSONLDKeyword JSONLDVersion
-                             JSONLDContexts is_JSONLDContainerDef
-                             JSONLDWildCard);
+                             JSONLDContextObj JSONLDContexts
+                             is_JSONLDContainerDef JSONLDWildCard);
 
 with 'Role::Markup::XML';
 
@@ -48,6 +49,19 @@ our $VERSION = '0.01';
 =head2 new %PARAMS
 
 =cut
+
+# a subroutine which will take a URI and produce JSON-LD
+sub _no_deref {
+    JSON::LD::RDFa::Error->throw(
+        'This instance doesn\'t support remote contexts!');
+}
+
+has deref => (
+    is      => 'ro',
+    isa     => Maybe[CodeRef],
+    coerce  => sub { defined $_ ? $_ : \&_no_deref },
+    default => sub { \&_no_deref },
+);
 
 =head2 convert $JSONLD [, %OPTIONS ]
 
@@ -116,7 +130,7 @@ sub convert {
     state $check = Type::Params::compile(
         Invocant, JSONLDWildCard,
         slurpy Dict[uri     => Optional[MaybeURIRef],
-                    context => Optional[JSONLDContext],
+                    context => Optional[JSONLDContextObj],
                     deref   => Optional[CodeRef] ]);
 
     my ($self, $json, $params) = $check->(@_);
@@ -124,17 +138,36 @@ sub convert {
     # normalize params
     my $uri     = $params->{uri};
     my $deref   = $params->{deref} || $self->deref;
-    my $context = $params->{context} ||=
-        JSON::LD::RDFa::Context->new(base => $uri, deref => $params->{deref});
+    my $context = $params->{context} ||
+        JSON::LD::RDFa::Context->new(base => $uri, deref => $deref);
 
-    # expand the json
-    my %p = (clone => 0);
+    # clone only when a live context is supplied
+    my %p = (clone => 1, merge => 1); #!$params->{context});
     # override these in case a context was supplied
     $p{base}  = $uri if $uri;
     $p{deref} = $params->{deref} if $params->{deref};
     my @graph = $context->expand($json, %p);
 
+    # XXX here we want the context to merge but in a way that
+    # accumulates, not overwrites its contents
+
+    #warn $context->language;
+    #warn Data::Dumper::Dumper($context);
+
     # now generate the document
+
+    # okay first off i don't know what to do with multiple resources
+    # (yet)
+
+    # second i don't know what to do with named graphs since rdfa
+    # doesn't support them
+
+    # anyway
+    my ($body, $doc) = $self->_XHTML(
+        ns => $context->ns, uri => $uri, vocab => $context->vocab,
+    );
+
+    $doc;
 }
 
 =head1 SEE ALSO
