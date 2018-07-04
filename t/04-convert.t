@@ -15,12 +15,30 @@ my $json = JSON::decode_json(<<'JSON');
     "@base": "http://foo.com/",
     "@language": "en",
     "@vocab": "http://www.w3.org/1999/xhtml/vocab#",
+    "bibo": "http://purl.org/ontology/bibo/",
     "dct": "http://purl.org/dc/terms/",
     "foaf": "http://xmlns.com/foaf/0.1/"
   },
   "@id": "",
   "@type": "foaf:Document",
-  "dct:title": ["hi", { "@value": "bonjour", "@language": "fr" }]
+  "bibo:authorList": { "@list": [ "Joe Bobson", "Bob Joeson" ] },
+  "dct:title": { "@set": ["hi", { "@value": "bonjour", "@language": "fr" }] },
+  "dct:hasPart": [
+    {
+        "@id": "clowns",
+        "@type": "bibo:DocumentPart",
+        "dct:title": "something awesome",
+        "dct:hasPart": {
+            "@id" : "derp",
+            "@type": "bibo:DocumentPart",
+            "dct:title": "honk" }
+      },
+      {
+          "@id": "special",
+          "@type": "bibo:DocumentPart",
+          "dct:title": "hiyaaaaaa"
+      }
+  ]
 }
 JSON
 

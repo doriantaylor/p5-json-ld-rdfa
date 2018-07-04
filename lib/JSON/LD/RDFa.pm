@@ -152,7 +152,7 @@ sub convert {
     # accumulates, not overwrites its contents
 
     #warn $context->language;
-    #warn Data::Dumper::Dumper($context);
+    warn Data::Dumper::Dumper(\@graph);
 
     # now generate the document
 
@@ -162,12 +162,37 @@ sub convert {
     # second i don't know what to do with named graphs since rdfa
     # doesn't support them
 
+    my $ns = $context->ns;
+
+    my %outp = (ns => $ns, uri => $uri, vocab => $context->vocab,
+                lang => $context->language);
+    if (my $s = $graph[0]) {
+        my @types = sort map { $ns->abbreviate($_) } @{$s->{'@type'} || []};
+        $outp{attr} = { typeof => \@types } if @types;
+        $outp{uri} = $s->{'@id'} if !defined $outp{uri} and defined $s->{'@id'};
+
+        # now we construct the page like the mockup we did
+    }
+
     # anyway
-    my ($body, $doc) = $self->_XHTML(
-        ns => $context->ns, uri => $uri, vocab => $context->vocab,
-    );
+    my ($body, $doc) = $self->_XHTML(%outp);
 
     $doc;
+}
+
+sub _get_label {
+    my ($self, $predicate, @candidates) = @_;
+    @candidates = @{$candidates[0]} if ref $candidates[0] eq 'ARRAY';
+
+    # discard all resources
+
+    # partition into language vs type (plain is xsd:string per rdf 1.1)
+
+    # datatypes other than xsd:string get priority
+
+    # sort the language nodes by conneg (if there are any)
+
+    # 
 }
 
 =head1 SEE ALSO
